@@ -72,6 +72,9 @@ extern "C" void KartPadRequestControllerCompatibility() { g_nativeCompatibilityR
 namespace settings_overlay {
 namespace {
 using Clock = std::chrono::steady_clock;
+uint32_t g_cursorAutoHideSeconds = RuntimeConfigFile::CursorAutoHideSeconds(3);
+Clock::time_point g_lastMouseActivity{Clock::now()};
+bool g_cursorHidden = false;
 bool g_topBarVisible = false;
 bool g_exitPromptOpen = false;
 bool g_rumbleEnabled = RuntimeConfigFile::RumbleEnabled(true);
@@ -1159,6 +1162,7 @@ void ReloadNativeSettings() {
             RuntimeConfigFile::SetDisplayMode(std::string(kDisplayModeConfigNames[g_displayMode]));
     }
     g_showFps = c.showFps.value_or(true);
+    g_cursorAutoHideSeconds = c.cursorAutoHideSeconds.value_or(3);
     g_disableCopyFilter = c.disableCopyFilter.value_or(true);
     g_skipUnreadyPipelines = c.skipUnreadyPipelines.value_or(true);
     aurora_set_disable_copy_filter(g_disableCopyFilter);
@@ -1204,6 +1208,46 @@ void ApplyInputBlockState() {
     PADBlockInput(blocked);
     InputBindings::SetInputBlocked(blocked);
 }
+
+bool IsMouseActivity(const SDL_Event& event) {
+    switch (event.type) {
+    case SDL_EVENT_MOUSE_MOTION:
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+    case SDL_EVENT_MOUSE_WHEEL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Hides the pointer over the game window after a few idle seconds, but never
+// while an in-game panel that needs the mouse is open. Runs on the thread that
+// pumps SDL events, after the frame worker is idle, so the SDL and ImGui calls
+// are safe here.
+void UpdateCursorAutoHide() {
+    const bool pointerNeeded = controller_mapping_wizard::IsActive() || g_rebind.active ||
+                               g_exitPromptOpen || g_topBarVisible || g_compatibilityVisible
+#if defined(__APPLE__) && TARGET_OS_OSX
+                               || KartPadControllersVisible()
+#endif
+                               ;
+    const bool shouldHide = g_cursorAutoHideSeconds > 0 && !pointerNeeded &&
+                            Clock::now() - g_lastMouseActivity >=
+                                std::chrono::seconds(g_cursorAutoHideSeconds);
+    if (shouldHide == g_cursorHidden) {
+        return;
+    }
+    g_cursorHidden = shouldHide;
+    // ImGui_ImplSDL3_NewFrame calls SDL_ShowCursor every frame unless this flag is set.
+    if (shouldHide) {
+        ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+        SDL_HideCursor();
+    } else {
+        ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
+        SDL_ShowCursor();
+    }
+}
 } // namespace
 
 void InitializeRuntimeSettings() noexcept {
@@ -1242,6 +1286,9 @@ void HandleEvents(const AuroraEvent* events) noexcept {
         }
         if (ev->type != AURORA_SDL_EVENT) {
             continue;
+        }
+        if (IsMouseActivity(ev->sdl)) {
+            g_lastMouseActivity = Clock::now();
         }
         if (kartpad::IsMacSettingsShortcut(ev->sdl)) {
             KartPadOpenSettingsFromShortcut();
@@ -1291,6 +1338,7 @@ void Draw() noexcept {
     // The wizard captures raw presses; keep them out of the game even when the
     // compatibility window is closed mid-setup.
     ApplyInputBlockState();
+    UpdateCursorAutoHide();
     DrawStartupScreen();
 }
 
