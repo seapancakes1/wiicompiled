@@ -12,6 +12,9 @@ void Draw() noexcept;
 bool StartupScreenVisible() noexcept;
 void NotifyStrapInputAccepted() noexcept;
 void AdvancePresentedFrame() noexcept;
+// Mac: while another app is in front, holds the game still until KartPad comes back (unless the
+// setting is off, the game is still starting, or it is online). True when it waited.
+bool WaitWhileBackgroundPaused() noexcept;
 // Put host controllers back to a neutral state before the process ends.
 void ReleaseControllers() noexcept;
 } // namespace settings_overlay

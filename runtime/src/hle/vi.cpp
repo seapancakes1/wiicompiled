@@ -399,6 +399,12 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     }
 
     if (serviceAurora) {
+        // KartPad in the background holds the game here. It then carries on from now, rather than
+        // replaying the retraces it missed.
+        if (settings_overlay::WaitWhileBackgroundPaused()) {
+            std::lock_guard<std::mutex> lock(g_viMutex);
+            g_vi.lastRetrace = Clock::now();
+        }
         // Process window events (but don't present - that happens in GXCopyDisp)
         UpdateAuroraAndProcessEvents();
 

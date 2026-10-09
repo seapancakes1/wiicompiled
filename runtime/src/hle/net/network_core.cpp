@@ -716,6 +716,15 @@ extern "C" bool Network_HLE_IsFd(uint32_t fd) {
     return GetDeviceKind(fd).has_value();
 }
 
+extern "C" bool Network_HLE_HasOpenSockets() {
+    for (const WiiSocket& socket : g_sockets) {
+        if (socket.native != kInvalidSocket) {
+            return true;
+        }
+    }
+    return false;
+}
+
 extern "C" int32_t Network_HLE_Close(uint32_t fd) {
     if (!GetDeviceKind(fd)) {
         return -101;

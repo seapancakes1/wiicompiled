@@ -34,6 +34,7 @@ extern "C" void KartPadOpenSettingsFromShortcut();
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -61,6 +62,11 @@ void SetMixWorkerEnabled(bool enabled);
 #if TARGET_OS_OSX
 extern "C" void KartPadControllersTick();
 extern "C" bool KartPadControllersVisible();
+// The Mac shell: whether the game should hold still (another app is in front and the setting is on),
+// and the pause starting or ending.
+extern "C" bool KartPadBackgroundPauseWanted();
+extern "C" void KartPadBackgroundPauseChanged(bool paused);
+extern "C" bool Network_HLE_HasOpenSockets();
 #endif
 #endif
 namespace {
@@ -1356,4 +1362,46 @@ void NotifyStrapInputAccepted() noexcept {
 }
 
 void AdvancePresentedFrame() noexcept { ++g_presentedFrame; }
+
+bool WaitWhileBackgroundPaused() noexcept {
+#if defined(__APPLE__) && TARGET_OS_OSX
+    // Loading carries on while you look elsewhere, and an online game would drop out of its room.
+    if (StartupScreenVisible() || !KartPadBackgroundPauseWanted() || Network_HLE_HasOpenSockets()) {
+        return false;
+    }
+    KartPadBackgroundPauseChanged(true);
+    // Waiting runs AppKit, which notices KartPad coming back. Window, display and device changes
+    // meanwhile go back to Aurora afterwards; input is read fresh on the next frame, and some events'
+    // data is only valid until the next poll. Quitting ends the pause.
+    std::vector<SDL_Event> kept;
+    bool quitting = false;
+    while (!quitting && KartPadBackgroundPauseWanted()) {
+        SDL_Event event;
+        if (!SDL_WaitEventTimeout(&event, 250)) {
+            continue;
+        }
+        do {
+            const uint32_t type = event.type;
+            quitting |= type == SDL_EVENT_QUIT || type == SDL_EVENT_TERMINATING ||
+                        type == SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+            if (type == SDL_EVENT_QUIT || type == SDL_EVENT_TERMINATING ||
+                (type >= SDL_EVENT_WINDOW_FIRST && type <= SDL_EVENT_WINDOW_LAST) ||
+                (type >= SDL_EVENT_DISPLAY_FIRST && type <= SDL_EVENT_DISPLAY_LAST) ||
+                type == SDL_EVENT_GAMEPAD_ADDED || type == SDL_EVENT_GAMEPAD_REMOVED ||
+                type == SDL_EVENT_GAMEPAD_REMAPPED || type == SDL_EVENT_JOYSTICK_ADDED ||
+                type == SDL_EVENT_JOYSTICK_REMOVED || type == SDL_EVENT_AUDIO_DEVICE_ADDED ||
+                type == SDL_EVENT_AUDIO_DEVICE_REMOVED || type >= SDL_EVENT_USER) {
+                kept.push_back(event);
+            }
+        } while (SDL_PollEvent(&event));
+    }
+    for (SDL_Event& event : kept) {
+        SDL_PushEvent(&event);
+    }
+    KartPadBackgroundPauseChanged(false);
+    return true;
+#else
+    return false;
+#endif
+}
 } // namespace settings_overlay

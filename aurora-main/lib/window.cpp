@@ -264,6 +264,22 @@ void process_event(SDL_Event& event) {
       g_nativeResizePending.store(true, std::memory_order_release);
     }
     break;
+  case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+  case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN: {
+    // The window's own fullscreen control (the green button on macOS) changes the mode as well.
+    // set_display_mode has already recorded the mode for its own transitions, so only a change
+    // from outside it moves windowed to borderless or back. Exclusive to borderless leaves and
+    // re-enters, so the window's state when the event is handled decides.
+    const bool entering = event.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN;
+    if (entering != get_fullscreen()) {
+      break;
+    }
+    AuroraDisplayMode expected = entering ? AURORA_DISPLAY_MODE_WINDOWED : AURORA_DISPLAY_MODE_BORDERLESS;
+    g_displayMode.compare_exchange_strong(expected,
+                                          entering ? AURORA_DISPLAY_MODE_BORDERLESS : AURORA_DISPLAY_MODE_WINDOWED,
+                                          std::memory_order_acq_rel);
+    break;
+  }
   case SDL_EVENT_WINDOW_MOVED: {
     g_events.push_back(AuroraEvent{
         .type = AURORA_WINDOW_MOVED,
