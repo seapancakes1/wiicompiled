@@ -45,6 +45,7 @@ extern "C" void KartPadOpenSettingsFromShortcut();
 #include <dolphin/pad.h>
 
 extern "C" void PAD_HLE_SetRumbleEnabled(bool enabled);
+extern "C" void PAD_HLE_SetRumbleStrength(float strength);
 #include <dolphin/vi.h>
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
@@ -1182,6 +1183,18 @@ void ReloadNativeSettings() {
     g_uiVolumePercent = percent(c.audioUiVolume.value_or(1));
     g_voicesVolumePercent = percent(c.audioVoicesVolume.value_or(1));
     g_audioMuted = c.audioMuted.value_or(false);
+    const bool rumble = c.rumbleEnabled.value_or(true);
+    if (rumble != g_rumbleEnabled) {
+        g_rumbleEnabled = rumble;
+        PAD_HLE_SetRumbleEnabled(rumble);
+        // Turning it off stops a motor that is already running.
+        if (!rumble) {
+            constexpr std::array<uint32_t, PAD_MAX_CONTROLLERS> stopAll{
+                PAD_MOTOR_STOP_HARD, PAD_MOTOR_STOP_HARD, PAD_MOTOR_STOP_HARD, PAD_MOTOR_STOP_HARD};
+            PADControlAllMotors(stopAll.data());
+        }
+    }
+    PAD_HLE_SetRumbleStrength(std::clamp(c.rumbleStrength.value_or(0.5f), 0.0f, 1.0f));
     AudioBackend::Instance().SetMasterVolume(g_audioVolumePercent / 100.0f);
     AudioBackend::Instance().SetMuted(g_audioMuted);
     MusicAttenuation::SetMusicVolume(g_musicVolumePercent / 100.0f);
@@ -1258,6 +1271,7 @@ void UpdateCursorAutoHide() {
 
 void InitializeRuntimeSettings() noexcept {
     PAD_HLE_SetRumbleEnabled(g_rumbleEnabled);
+    PAD_HLE_SetRumbleStrength(RuntimeConfigFile::RumbleStrength());
     InputBindings::Reload();
     controller_mapping_wizard::LoadPersistedMappings();
     ApplyConfiguredMappings();
@@ -1370,6 +1384,10 @@ bool WaitWhileBackgroundPaused() noexcept {
         return false;
     }
     KartPadBackgroundPauseChanged(true);
+    // Variable rumble runs out by itself; GameCube motors wait for a stop.
+    constexpr std::array<uint32_t, PAD_MAX_CONTROLLERS> stopAll{
+        PAD_MOTOR_STOP, PAD_MOTOR_STOP, PAD_MOTOR_STOP, PAD_MOTOR_STOP};
+    PADControlAllMotors(stopAll.data());
     // Waiting runs AppKit, which notices KartPad coming back. Window, display and device changes
     // meanwhile go back to Aurora afterwards; input is read fresh on the next frame, and some events'
     // data is only valid until the next poll. Quitting ends the pause.

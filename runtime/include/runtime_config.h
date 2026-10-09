@@ -99,6 +99,8 @@ struct RuntimeUserConfig {
     // "dpad_up,left_shoulder") as values; pressing either bound button counts.
     std::array<std::optional<std::string>, 12> controllerButtons;
     std::optional<bool> rumbleEnabled;
+    // 0-1, how hard a controller with variable rumble vibrates (GameCube motors are on or off).
+    std::optional<float> rumbleStrength;
     std::optional<int32_t> muteHotkey;
     std::map<std::string, std::string> controllerExpressions;
 };
@@ -447,6 +449,10 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     }
 
     config.rumbleEnabled = FindConfigValue<bool>(document, "controller", "rumble");
+    if (auto value = FindConfigFloat(document, "controller", "rumble_strength");
+        value && *value >= 0.0f && *value <= 1.0f) {
+        config.rumbleStrength = *value;
+    }
     if (auto value = FindConfigInt(document, "audio", "mute_key")) {
         config.muteHotkey = *value;
     }
@@ -752,6 +758,10 @@ inline bool RumbleEnabled(bool fallback = true) {
 inline bool SetRumbleEnabled(bool value) {
     Mutable().rumbleEnabled = value;
     return WriteSetting("controller", "rumble", value ? "true" : "false");
+}
+
+inline float RumbleStrength(float fallback = 0.5f) {
+    return std::clamp(Get().rumbleStrength.value_or(fallback), 0.0f, 1.0f);
 }
 
 inline int32_t MuteHotkey(int32_t fallback) {

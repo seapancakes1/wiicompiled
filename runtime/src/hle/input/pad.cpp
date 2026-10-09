@@ -6,7 +6,10 @@
 #include "wup028_adapter.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -19,6 +22,44 @@
 namespace {
 
 std::atomic<bool> g_rumbleEnabled{true};
+std::atomic<float> g_rumbleStrength{0.5f};
+
+// The game turns each GameCube motor on and off. A pad with variable rumble gets the strength from
+// Settings, for a short while that each frame renews while the motor is on, so a game that stops
+// (an alert, the background pause) never leaves a controller vibrating. GameCube adapters keep
+// Aurora's on/off motor commands.
+using RumbleClock = std::chrono::steady_clock;
+constexpr uint32_t kRumbleMs = 250;
+constexpr auto kRumbleRenew = std::chrono::milliseconds(100);
+std::array<bool, PAD_CHANMAX> g_motorOn{};
+std::array<RumbleClock::time_point, PAD_CHANMAX> g_motorSent{};
+
+SDL_Gamepad* VariableRumblePad(uint32_t chan) {
+    if (chan >= PAD_CHANMAX || !PADSupportsRumbleIntensity(chan)) {
+        return nullptr;
+    }
+    const int32_t index = PADGetIndexForPort(chan);
+    return index < 0 ? nullptr : PADGetSDLGamepadForIndex(static_cast<uint32_t>(index));
+}
+
+void SendRumble(SDL_Gamepad* pad, uint32_t chan, bool on) {
+    const auto level = static_cast<uint16_t>(
+        std::lround(g_rumbleStrength.load(std::memory_order_relaxed) * 65535.0f));
+    SDL_RumbleGamepad(pad, on ? level : 0, on ? level : 0, on ? kRumbleMs : 0);
+    g_motorSent[chan] = RumbleClock::now();
+}
+
+void RenewRumble() {
+    const auto now = RumbleClock::now();
+    for (uint32_t chan = 0; chan < PAD_CHANMAX; ++chan) {
+        if (!g_motorOn[chan] || now - g_motorSent[chan] < kRumbleRenew) {
+            continue;
+        }
+        if (SDL_Gamepad* pad = VariableRumblePad(chan)) {
+            SendRumble(pad, chan, g_rumbleEnabled.load(std::memory_order_relaxed));
+        }
+    }
+}
 
 bool NativeButtonHeld(SDL_Gamepad* gamepad, uint32_t nativeButton) {
     if (gamepad == nullptr || nativeButton == PAD_NATIVE_BUTTON_INVALID ||
@@ -133,6 +174,11 @@ extern "C" void PAD_HLE_SetRumbleEnabled(bool enabled)
     g_rumbleEnabled.store(enabled, std::memory_order_relaxed);
 }
 
+extern "C" void PAD_HLE_SetRumbleStrength(float strength)
+{
+    g_rumbleStrength.store(std::clamp(strength, 0.0f, 1.0f), std::memory_order_relaxed);
+}
+
 extern "C" uint32_t PAD__Init_HLE()
 {
     Wup028Adapter::Initialize();
@@ -155,6 +201,7 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
     // Keep looking for a Bluetooth Wii Remote that dropped out (or was turned on late).
     WiiRemoteInput::Poll();
     uint32_t rumbleMask = PADRead(statuses);
+    RenewRumble();
     // Wii Remotes reach the game through KPAD, not as GameCube pads. This also
     // applies while input is blocked (overlay open) so the port does not flip
     // between "connected" and "no controller" every time the overlay toggles.
@@ -192,6 +239,16 @@ extern "C" void PAD__ControlMotor_HLE(int32_t chan, uint32_t command)
 {
     if (command == PAD_MOTOR_RUMBLE && !g_rumbleEnabled.load(std::memory_order_relaxed)) {
         command = PAD_MOTOR_STOP;
+    }
+    const bool on = command == PAD_MOTOR_RUMBLE;
+    if (chan >= 0 && chan < PAD_CHANMAX) {
+        const bool changed = g_motorOn[chan] != on;
+        g_motorOn[chan] = on;
+        if (SDL_Gamepad* pad = VariableRumblePad(static_cast<uint32_t>(chan))) {
+            // The game repeats its commands; only a change (or a stop) needs a report.
+            if (changed || !on) SendRumble(pad, static_cast<uint32_t>(chan), on);
+            return;
+        }
     }
     PADControlMotor(chan, command);
 }
