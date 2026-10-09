@@ -50,6 +50,13 @@
 #endif
 #include <unistd.h>
 #endif
+#if defined(__APPLE__)
+#include <cxxabi.h>
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 
 #include "abi_bridge.h"
 #include "guest_flat_memory.h"
@@ -157,6 +164,8 @@ private:
 namespace {
 
 std::string g_lastEntryLabel;
+// The host trace from the most recent fatal signal, repeated in the crash log file.
+std::string g_signalHostTrace;
 std::atomic_bool g_auroraInitialized{false};
 std::atomic_flag g_abortSignalHandled = ATOMIC_FLAG_INIT;
 std::atomic_bool g_fatalErrorReported{false};
@@ -710,6 +719,7 @@ void WriteFatalLogImpl(std::string_view reason, std::string_view extraDetails = 
     } else {
         out << "[runtime] CPU context unavailable." << std::endl;
     }
+    out << g_signalHostTrace;
 
     // Guest memory snapshots so the heap/object state can be walked offline.
     // Written once per process: several fatal paths can fire in sequence
@@ -734,6 +744,82 @@ void SetRuntimeExitCodeImpl(int code) {
 
 namespace {
 
+#if defined(__APPLE__)
+// Host code that runs inside the game loop (SDL event handling, the Mii editor, menus) faults
+// under whatever guest function is active, so the guest dump alone cannot place these crashes.
+// Each frame carries image+offset, which `atos -o <binary> -l <load address>` turns into a line.
+void AppendHostFrame(std::string& out, const char* label, uintptr_t address, bool returnAddress) {
+    char line[1024];
+    Dl_info info{};
+    // A return address points after the call; look up the call itself.
+    const uintptr_t lookup = returnAddress && address > 0 ? address - 1 : address;
+    if (dladdr(reinterpret_cast<void*>(lookup), &info) == 0 || info.dli_fbase == nullptr) {
+        std::snprintf(line, sizeof(line), "  %s 0x%016llx\n", label,
+                      static_cast<unsigned long long>(address));
+        out += line;
+        return;
+    }
+    const char* image = info.dli_fname != nullptr ? std::strrchr(info.dli_fname, '/') : nullptr;
+    image = image != nullptr ? image + 1 : (info.dli_fname != nullptr ? info.dli_fname : "?");
+    std::string symbol = info.dli_sname != nullptr ? info.dli_sname : "?";
+    int status = 0;
+    if (char* demangled = info.dli_sname != nullptr
+            ? abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status) : nullptr) {
+        symbol = demangled;
+        std::free(demangled);
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    const uintptr_t start = reinterpret_cast<uintptr_t>(info.dli_saddr);
+    std::snprintf(line, sizeof(line), "  %s 0x%016llx %s+0x%llx (load 0x%llx) %s+0x%llx\n", label,
+                  static_cast<unsigned long long>(address), image,
+                  static_cast<unsigned long long>(address - base),
+                  static_cast<unsigned long long>(base), symbol.c_str(),
+                  static_cast<unsigned long long>(start != 0 ? address - start : 0));
+    out += line;
+}
+
+// Walks the frame-pointer chain from the interrupted context. Guest code runs on fiber stacks,
+// not the thread's own stack, so every frame record is read through the kernel and a bad
+// pointer ends the walk instead of faulting inside the fault handler.
+std::string FormatSignalHostStackTrace(const void* ucontextVoid) {
+    std::string out = "[runtime] Host stack trace (faulting context):\n";
+    if (ucontextVoid == nullptr) {
+        return out + "  context unavailable\n";
+    }
+    const auto* uc = static_cast<const ucontext_t*>(ucontextVoid);
+#if defined(__aarch64__)
+    const uintptr_t pc = __darwin_arm_thread_state64_get_pc(uc->uc_mcontext->__ss);
+    const uintptr_t lr = __darwin_arm_thread_state64_get_lr(uc->uc_mcontext->__ss);
+    uintptr_t fp = __darwin_arm_thread_state64_get_fp(uc->uc_mcontext->__ss);
+#elif defined(__x86_64__)
+    const uintptr_t pc = uc->uc_mcontext->__ss.__rip;
+    const uintptr_t lr = 0;
+    uintptr_t fp = uc->uc_mcontext->__ss.__rbp;
+#else
+    return out + "  unsupported architecture\n";
+#endif
+    AppendHostFrame(out, "#0", pc, false);
+    // A leaf function never stores lr, so its caller is only here.
+    if (lr != 0) AppendHostFrame(out, "lr", lr, true);
+    for (int frame = 1; frame < 64 && fp != 0 && (fp & 0x7) == 0; ++frame) {
+        uintptr_t record[2] = {};  // saved fp, return address
+        mach_vm_size_t read = 0;
+        if (mach_vm_read_overwrite(mach_task_self(), fp, sizeof(record),
+                                   reinterpret_cast<mach_vm_address_t>(record), &read) !=
+                KERN_SUCCESS ||
+            read != sizeof(record) || record[1] == 0) {
+            break;
+        }
+        char label[8];
+        std::snprintf(label, sizeof(label), "#%d", frame);
+        AppendHostFrame(out, label, record[1], true);
+        if (record[0] <= fp) break;  // Frames move up the stack; anything else is garbage.
+        fp = record[0];
+    }
+    return out;
+}
+#endif
+
 void DumpHostStackTrace() {
 #if defined(_WIN32)
     static std::atomic_flag s_inProgress = ATOMIC_FLAG_INIT;
@@ -744,6 +830,17 @@ void DumpHostStackTrace() {
     std::fputs(trace.c_str(), stderr);
     std::fflush(stderr);
     s_inProgress.clear();
+#elif defined(__APPLE__)
+    void* frames[64];
+    const int count = backtrace(frames, 64);
+    std::string out = "[runtime] Host stack trace:\n";
+    for (int i = 1; i < count; ++i) {
+        char label[8];
+        std::snprintf(label, sizeof(label), "#%d", i - 1);
+        AppendHostFrame(out, label, reinterpret_cast<uintptr_t>(frames[i]), true);
+    }
+    std::fputs(out.c_str(), stderr);
+    std::fflush(stderr);
 #else
     RT_LOGF(RT_TAG_RUNTIME, "Host stack trace unavailable on this platform\n");
     std::fflush(stderr);
@@ -1201,6 +1298,12 @@ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
     }
 
     ReportUnhandledSignalFault(sig, faultAddress);
+#if defined(__APPLE__)
+    // Before the fatal dialog, which can sit open for as long as the player leaves it.
+    g_signalHostTrace = FormatSignalHostStackTrace(ucontextVoid);
+    std::fputs(g_signalHostTrace.c_str(), stderr);
+    std::fflush(stderr);
+#endif
     std::ostringstream popupDetails;
     popupDetails << "A native signal (" << sig << ") occurred";
     if (!g_lastEntryLabel.empty()) {
@@ -1214,7 +1317,9 @@ void PosixMemoryFaultHandler(int sig, siginfo_t* info, void* ucontextVoid) {
     popupDetails << ".\n\nThe process transcript and crash log contain the full CPU and stack "
                     "diagnostics.";
     ShowRuntimeFatalPopup("a native crash occurred", popupDetails.str());
+#if !defined(__APPLE__)
     DumpHostStackTrace();
+#endif
     WriteFatalLogImpl(sig == SIGBUS ? "sigbus" : "sigsegv");
 
     std::cerr.flush();
