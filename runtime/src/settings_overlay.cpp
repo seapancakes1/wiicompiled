@@ -68,6 +68,9 @@ extern "C" bool KartPadControllersVisible();
 extern "C" bool KartPadBackgroundPauseWanted();
 extern "C" void KartPadBackgroundPauseChanged(bool paused);
 extern "C" bool Network_HLE_HasOpenSockets();
+// The Mac shell: a KartPad screen (HOME, Controllers, Settings, Miis) is open over the game and
+// would like it held still.
+extern "C" bool KartPadOverlayPauseWanted();
 #endif
 #endif
 namespace {
@@ -75,6 +78,8 @@ std::atomic_bool g_nativeSettingsReload{false};
 std::atomic_bool g_nativeCompatibilityRequest{false};
 }
 extern "C" void KartPadRequestSettingsReload() { g_nativeSettingsReload.store(true); }
+// The black "KartPad" screen is up while the game starts (settings_overlay::StartupScreenVisible).
+extern "C" bool KartPadGameStarting() { return settings_overlay::StartupScreenVisible(); }
 extern "C" void KartPadRequestControllerCompatibility() { g_nativeCompatibilityRequest.store(true); }
 namespace settings_overlay {
 namespace {
@@ -1145,6 +1150,15 @@ void DrawControllerCompatibility() {
     ImGui::End();
 }
 
+// Automated checks (KARTPAD_MUTED=1) keep the game silent whatever the settings say.
+bool AutomationMuted() {
+    static const bool muted = [] {
+        const char* value = std::getenv("KARTPAD_MUTED");
+        return value != nullptr && value[0] == '1';
+    }();
+    return muted;
+}
+
 void ReloadNativeSettings() {
     if (!g_nativeSettingsReload.exchange(false)) return;
     const auto c = RuntimeConfigFile::LoadConfigFile();
@@ -1196,7 +1210,7 @@ void ReloadNativeSettings() {
     }
     PAD_HLE_SetRumbleStrength(std::clamp(c.rumbleStrength.value_or(0.5f), 0.0f, 1.0f));
     AudioBackend::Instance().SetMasterVolume(g_audioVolumePercent / 100.0f);
-    AudioBackend::Instance().SetMuted(g_audioMuted);
+    AudioBackend::Instance().SetMuted(g_audioMuted || AutomationMuted());
     MusicAttenuation::SetMusicVolume(g_musicVolumePercent / 100.0f);
     MusicAttenuation::SetSoundEffectsVolume(g_soundEffectsVolumePercent / 100.0f);
     MusicAttenuation::SetUiVolume(g_uiVolumePercent / 100.0f);
@@ -1276,7 +1290,7 @@ void InitializeRuntimeSettings() noexcept {
     controller_mapping_wizard::LoadPersistedMappings();
     ApplyConfiguredMappings();
     AudioBackend::Instance().SetMasterVolume(static_cast<float>(g_audioVolumePercent) / 100.0f);
-    AudioBackend::Instance().SetMuted(g_audioMuted);
+    AudioBackend::Instance().SetMuted(g_audioMuted || AutomationMuted());
     MusicAttenuation::SetMusicVolume(static_cast<float>(g_musicVolumePercent) / 100.0f);
     MusicAttenuation::SetSoundEffectsVolume(static_cast<float>(g_soundEffectsVolumePercent) / 100.0f);
     MusicAttenuation::SetUiVolume(static_cast<float>(g_uiVolumePercent) / 100.0f);
@@ -1376,11 +1390,45 @@ void NotifyStrapInputAccepted() noexcept {
 }
 
 void AdvancePresentedFrame() noexcept { ++g_presentedFrame; }
+} // namespace settings_overlay
+// Frames presented so far, for the Mac shell's automated checks (is the game held still?).
+extern "C" uint64_t KartPadPresentedFrames() { return settings_overlay::PresentedFrameCount(); }
+namespace settings_overlay {
+uint64_t PresentedFrameCount() noexcept { return g_presentedFrame; }
+
+#if defined(__APPLE__) && TARGET_OS_OSX
+namespace {
+// A KartPad screen over the game holds it still. Unlike the background pause, Aurora keeps taking
+// its events (controllers connecting, the window changing) and the shell keeps reading the pads and
+// drawing its screen; the game draws nothing, so its last frame stays under the screen. A settings
+// change (volume, full screen) lets one frame through to apply it, then the hold resumes.
+bool WaitWhileOverlayOpen() {
+    constexpr std::array<uint32_t, PAD_MAX_CONTROLLERS> stopAll{
+        PAD_MOTOR_STOP, PAD_MOTOR_STOP, PAD_MOTOR_STOP, PAD_MOTOR_STOP};
+    PADControlAllMotors(stopAll.data());
+    ApplyInputBlockState();
+    while (KartPadOverlayPauseWanted() && !g_nativeSettingsReload.load() && !Network_HLE_HasOpenSockets()) {
+        SDL_WaitEventTimeout(nullptr, 16);
+        UpdateAuroraAndProcessEvents();
+        KartPadControllersTick();
+        ApplyInputBlockState();
+        UpdateCursorAutoHide();
+    }
+    return true;
+}
+} // namespace
+#endif
 
 bool WaitWhileBackgroundPaused() noexcept {
 #if defined(__APPLE__) && TARGET_OS_OSX
     // Loading carries on while you look elsewhere, and an online game would drop out of its room.
-    if (StartupScreenVisible() || !KartPadBackgroundPauseWanted() || Network_HLE_HasOpenSockets()) {
+    if (StartupScreenVisible() || Network_HLE_HasOpenSockets()) {
+        return false;
+    }
+    if (!KartPadBackgroundPauseWanted() && KartPadOverlayPauseWanted()) {
+        return WaitWhileOverlayOpen();
+    }
+    if (!KartPadBackgroundPauseWanted()) {
         return false;
     }
     KartPadBackgroundPauseChanged(true);

@@ -10,6 +10,7 @@ void InitializeRuntimeSettings() noexcept;
 void HandleEvents(const AuroraEvent* events) noexcept;
 void Draw() noexcept;
 bool StartupScreenVisible() noexcept;
+uint64_t PresentedFrameCount() noexcept;
 void NotifyStrapInputAccepted() noexcept;
 void AdvancePresentedFrame() noexcept;
 // Mac: while another app is in front, holds the game still until KartPad comes back (unless the

@@ -1,5 +1,6 @@
 #include "wii_remote_input.h"
 
+#include "input_bindings.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 
@@ -614,7 +615,7 @@ int16_t ClassicStickRaw(Sint16 axis, bool invert) {
 }
 
 // Samples buttons, accelerometers and the extension of the remote on a port.
-bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
+bool ReadKpadSampleFromDevice(uint32_t chan, KpadSample& sample) {
     if (chan >= PAD_MAX_CONTROLLERS) {
         return false;
     }
@@ -723,6 +724,34 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
             for (int i = 0; i < 3; ++i) lastNunchuk.acc[i] = sample.nunchukAcc[i];
         } else {
             for (int i = 0; i < 3; ++i) sample.nunchukAcc[i] = lastNunchuk.acc[i];
+        }
+    }
+    return true;
+}
+
+// What the game sees of the remote on a port. HOME belongs to KartPad, which opens its HOME screen
+// with it, so the game never gets it. While a KartPad screen is open over the game the remote stays
+// connected but reads as idle: buttons up, sticks centred, held at rest.
+bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
+    if (!ReadKpadSampleFromDevice(chan, sample)) {
+        return false;
+    }
+    sample.hold &= ~kWpadHome;
+    sample.clHold &= ~kClHome;
+    if (InputBindings::InputBlocked()) {
+        const KpadSample idle{};
+        const bool hasNunchuk = sample.hasNunchuk, hasClassic = sample.hasClassic;
+        float acc[3], nunchukAcc[3];
+        for (int i = 0; i < 3; ++i) {
+            acc[i] = sample.acc[i];
+            nunchukAcc[i] = sample.nunchukAcc[i];
+        }
+        sample = idle;
+        sample.hasNunchuk = hasNunchuk;
+        sample.hasClassic = hasClassic;
+        for (int i = 0; i < 3; ++i) {
+            sample.acc[i] = acc[i];
+            sample.nunchukAcc[i] = nunchukAcc[i];
         }
     }
     return true;

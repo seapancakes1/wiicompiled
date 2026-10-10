@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "wii_remote_input.h"
+#include "input_bindings.h"
 
 #include <algorithm>
 #include <array>
@@ -69,6 +70,10 @@ std::array<uint32_t, 4> g_previousClassicButtons{};
 std::array<std::atomic<uint32_t>, 4> g_pendingPresses{};
 std::array<std::atomic<uint32_t>, 4> g_pendingClassicPresses{};
 std::array<std::atomic<bool>, 4> g_keyboardConnected{};
+// Channel 0 is the keyboard's Classic Controller while the keyboard plays as Player 1. When the Mac
+// shell gives the keyboard to another player (its GameCube port), channel 0 stays connected, so the
+// game doesn't ask for a Wii Remote, but reads as idle.
+std::atomic<bool> g_keyboardDrivesChannel0{true};
 std::atomic<bool> g_fixtureArmRequested{false};
 std::atomic<bool> g_preciseMenuPulseRequested{false};
 std::array<std::atomic<uint64_t>, SDL_SCANCODE_COUNT> g_syntheticExpiryNs{};
@@ -444,7 +449,6 @@ uint32_t ButtonForScancode(uint32_t chan, SDL_Scancode code)
     case SDL_SCANCODE_SPACE: return kWpadButtonPlus;
     case SDL_SCANCODE_Q: return kWpadButtonOne;
     case SDL_SCANCODE_E: return kWpadButtonTwo;
-    case SDL_SCANCODE_ESCAPE: return kWpadButtonA;
     case SDL_SCANCODE_LEFT: return kWpadButtonLeft;
     case SDL_SCANCODE_RIGHT: return kWpadButtonRight;
     case SDL_SCANCODE_DOWN: return kWpadButtonDown;
@@ -481,7 +485,6 @@ uint32_t ClassicButtonForScancode(uint32_t chan, SDL_Scancode code)
     case SDL_SCANCODE_E: return kClassicButtonR;
     case SDL_SCANCODE_LSHIFT: return kClassicButtonL;
     case SDL_SCANCODE_TAB: return kClassicButtonMinus;
-    case SDL_SCANCODE_ESCAPE: return kClassicButtonA;
     case SDL_SCANCODE_LEFT: return kClassicButtonLeft;
     case SDL_SCANCODE_RIGHT: return kClassicButtonRight;
     case SDL_SCANCODE_DOWN: return kClassicButtonDown;
@@ -496,6 +499,11 @@ uint32_t ClassicButtonForScancode(uint32_t chan, SDL_Scancode code)
 
 bool SDLCALL WatchKeyboardEvent(void*, SDL_Event* event)
 {
+    // Keys pressed on a KartPad screen over the game (HOME, Controllers, Settings) are that
+    // screen's; they don't queue up presses for when the game carries on.
+    if (InputBindings::InputBlocked()) {
+        return true;
+    }
     if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat) {
         if (event->key.scancode == SDL_SCANCODE_F6) {
             const bool enabled = !g_preciseMenuPulseRequested.load(std::memory_order_acquire);
@@ -519,6 +527,7 @@ bool SDLCALL WatchKeyboardEvent(void*, SDL_Event* event)
             std::fprintf(stderr, "[input] keyboard channel %u disconnected\n", chan);
         }
         for (uint32_t chan = 0; chan < g_pendingPresses.size(); ++chan) {
+            if (chan == 0 && !g_keyboardDrivesChannel0.load(std::memory_order_acquire)) continue;
             const uint32_t core = ButtonForScancode(chan, event->key.scancode);
             const uint32_t classic = ClassicButtonForScancode(chan, event->key.scancode);
             if (chan != 0 && (core & kWpadButtonPlus) != 0 &&
@@ -595,10 +604,22 @@ float ReadKeyboardAxisLevel(const bool* keys, int keyCount, SDL_Scancode code)
     return syntheticallyDown ? (FullSyntheticStickEnabled() ? 1.0f : 0.35f) : 0.0f;
 }
 
+// The keyboard's state as the game reads it: nothing while a KartPad screen is open over the game.
+const bool* GameKeyboardState(int* keyCount)
+{
+    static const bool none[SDL_SCANCODE_COUNT] = {};
+    if (InputBindings::InputBlocked()) {
+        *keyCount = 0;
+        return none;
+    }
+    return SDL_GetKeyboardState(keyCount);
+}
+
 uint32_t ReadKeyboardButtons(uint32_t chan)
 {
+    if (chan == 0 && !g_keyboardDrivesChannel0.load(std::memory_order_acquire)) return 0;
     int keyCount = 0;
-    const bool* keys = SDL_GetKeyboardState(&keyCount);
+    const bool* keys = GameKeyboardState(&keyCount);
     const auto down = [&](SDL_Scancode code) { return IsKeyDown(keys, keyCount, code); };
 
     uint32_t buttons = 0;
@@ -611,8 +632,9 @@ uint32_t ReadKeyboardButtons(uint32_t chan)
 
 uint32_t ReadClassicButtons(uint32_t chan)
 {
+    if (chan == 0 && !g_keyboardDrivesChannel0.load(std::memory_order_acquire)) return 0;
     int keyCount = 0;
-    const bool* keys = SDL_GetKeyboardState(&keyCount);
+    const bool* keys = GameKeyboardState(&keyCount);
     uint32_t buttons = 0;
     for (int code = 0; code < SDL_SCANCODE_COUNT; ++code) {
         const auto scancode = static_cast<SDL_Scancode>(code);
@@ -625,8 +647,9 @@ uint32_t ReadClassicButtons(uint32_t chan)
 
 std::array<float, 2> ReadClassicLeftStick(uint32_t chan)
 {
+    if (chan == 0 && !g_keyboardDrivesChannel0.load(std::memory_order_acquire)) return {0.0f, 0.0f};
     int keyCount = 0;
-    const bool* keys = SDL_GetKeyboardState(&keyCount);
+    const bool* keys = GameKeyboardState(&keyCount);
     const std::array<SDL_Scancode, 4> profile = chan == 0 ?
         std::array<SDL_Scancode, 4>{SDL_SCANCODE_A, SDL_SCANCODE_D, SDL_SCANCODE_S, SDL_SCANCODE_W} :
         chan == 1 ? std::array<SDL_Scancode, 4>{SDL_SCANCODE_T, SDL_SCANCODE_Y, SDL_SCANCODE_H, SDL_SCANCODE_G} :
@@ -958,6 +981,12 @@ void WriteUnifiedStatus(uint32_t addr, const WiiRemoteInput::KpadSample* sample)
 }
 
 } // namespace
+
+// The Mac shell: whether the keyboard plays as Player 1 (see g_keyboardDrivesChannel0).
+extern "C" void KartPadSetKeyboardDrivesWiiChannel0(bool drives)
+{
+    g_keyboardDrivesChannel0.store(drives, std::memory_order_release);
+}
 
 // KPADRead: fills KPADStatus[0] for `chan` from the Bluetooth remote, returns the entry count.
 extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t count)
