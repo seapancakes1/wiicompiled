@@ -739,20 +739,13 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     sample.hold &= ~kWpadHome;
     sample.clHold &= ~kClHome;
     if (InputBindings::InputBlocked()) {
-        const KpadSample idle{};
-        const bool hasNunchuk = sample.hasNunchuk, hasClassic = sample.hasClassic;
-        float acc[3], nunchukAcc[3];
-        for (int i = 0; i < 3; ++i) {
-            acc[i] = sample.acc[i];
-            nunchukAcc[i] = sample.nunchukAcc[i];
-        }
+        // Lying still, buttons up: no tilt steering a Wii Wheel or shake doing a trick either.
+        KpadSample idle{};
+        idle.hasNunchuk = sample.hasNunchuk;
+        idle.hasClassic = sample.hasClassic;
+        idle.acc[1] = -1.0f;
+        idle.nunchukAcc[1] = -1.0f;
         sample = idle;
-        sample.hasNunchuk = hasNunchuk;
-        sample.hasClassic = hasClassic;
-        for (int i = 0; i < 3; ++i) {
-            sample.acc[i] = acc[i];
-            sample.nunchukAcc[i] = nunchukAcc[i];
-        }
     }
     return true;
 }

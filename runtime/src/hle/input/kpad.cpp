@@ -604,15 +604,39 @@ float ReadKeyboardAxisLevel(const bool* keys, int keyCount, SDL_Scancode code)
     return syntheticallyDown ? (FullSyntheticStickEnabled() ? 1.0f : 0.35f) : 0.0f;
 }
 
-// The keyboard's state as the game reads it: nothing while a KartPad screen is open over the game.
+// The keyboard's state as the game reads it: nothing while a KartPad screen is open over the game,
+// and keys still held when it closes (the one that closed it) stay unheard until they're let go, as
+// Aurora's pad layer does for GameCube pads.
 const bool* GameKeyboardState(int* keyCount)
 {
     static const bool none[SDL_SCANCODE_COUNT] = {};
+    static bool wasBlocked = false;
+    static std::array<bool, SDL_SCANCODE_COUNT> held{};
+    static std::array<bool, SDL_SCANCODE_COUNT> filtered{};
     if (InputBindings::InputBlocked()) {
+        wasBlocked = true;
         *keyCount = 0;
         return none;
     }
-    return SDL_GetKeyboardState(keyCount);
+    int count = 0;
+    const bool* keys = SDL_GetKeyboardState(&count);
+    count = std::min(count, static_cast<int>(SDL_SCANCODE_COUNT));
+    if (wasBlocked) {
+        wasBlocked = false;
+        for (int i = 0; i < count; ++i) held[i] = keys[i];
+    }
+    bool any = false;
+    for (int i = 0; i < count; ++i) {
+        if (!keys[i]) held[i] = false;
+        any |= held[i];
+    }
+    if (!any) {
+        *keyCount = count;
+        return keys;
+    }
+    for (int i = 0; i < count; ++i) filtered[i] = keys[i] && !held[i];
+    *keyCount = count;
+    return filtered.data();
 }
 
 uint32_t ReadKeyboardButtons(uint32_t chan)

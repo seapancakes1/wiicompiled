@@ -391,7 +391,8 @@ void DrawWiiRemoteSettings(uint32_t selectedGamePort) {
     ImGui::Text("Port %u: %s", static_cast<unsigned>(selectedGamePort + 1), WiiRemoteInput::KindLabel(kind));
     if (kind == WiiRemoteInput::Kind::RemoteWithClassic) {
         WiiRemoteInput::KpadSample sample;
-        if (WiiRemoteInput::ReadKpadSample(selectedGamePort, sample)) {
+        // The remote itself: this window blocks the game's input, which ReadKpadSample would show as idle.
+        if (WiiRemoteInput::ReadKpadSampleFromDevice(selectedGamePort, sample)) {
             // WPAD_CL_BUTTON_* bits, in the game's own layout (no mapping involved).
             const auto held = [&](uint32_t bit, const char* on, const char* off) { return (sample.clHold & bit) ? on : off; };
             ImGui::Text("Classic: %s %s %s %s  %s %s  %s %s  %s %s  %s %s %s %s", held(0x0010, "A", "a"),

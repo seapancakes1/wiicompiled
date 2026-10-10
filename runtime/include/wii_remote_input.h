@@ -66,6 +66,8 @@ bool IsRemoteChannel(uint32_t chan);
 // Reads the current state of the remote on `chan`; false when IsRemoteChannel
 // is false. During the swap grace period the sample is neutral.
 bool ReadKpadSample(uint32_t chan, KpadSample& sample);
+// The remote itself, before KartPad's HOME and input blocking (for the controller tools' readout).
+bool ReadKpadSampleFromDevice(uint32_t chan, KpadSample& sample);
 
 // Remote accelerometer for the overlay readout: the SDL sample in g after the
 // zero-point correction (x right across the face, y out of the button face, z
