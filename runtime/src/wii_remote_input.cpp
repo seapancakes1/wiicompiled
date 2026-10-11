@@ -79,6 +79,20 @@ struct PortMemory {
 };
 std::array<PortMemory, PAD_MAX_CONTROLLERS> g_ports{};
 
+// What a remote still held as the game's input came back (IgnoreHeldInput), kept from the game until
+// let go. A stick counts from half way out (a direction in KartPad's menus) and is let go within a
+// quarter of the centre.
+struct HeldOver {
+    bool capture = false;  // the next sample notes what's held
+    uint32_t hold = 0;     // WPAD bits, Nunchuk C and Z included
+    uint32_t clHold = 0;   // Classic Controller bits
+    bool stick = false;    // Nunchuk stick
+    bool clStick = false;  // Classic left stick
+};
+std::array<HeldOver, PAD_MAX_CONTROLLERS> g_heldOver{};
+constexpr float kHeldStick = 0.5f;
+constexpr float kReleasedStick = 0.25f;
+
 bool g_wiiDriverEnabled = false;
 uint64_t g_lastScanMs = 0;
 uint32_t g_scanCount = 0;
@@ -729,9 +743,40 @@ bool ReadKpadSampleFromDevice(uint32_t chan, KpadSample& sample) {
     return true;
 }
 
+bool StickBeyond(const float stick[2], float extent) {
+    return std::max(std::fabs(stick[0]), std::fabs(stick[1])) > extent;
+}
+
+// Takes out of the sample what was held over from a KartPad screen and is still held.
+void SuppressHeldOver(uint32_t chan, KpadSample& sample) {
+    HeldOver& held = g_heldOver[chan];
+    if (held.capture) {
+        held.capture = false;
+        held.hold = sample.hold;
+        held.clHold = sample.clHold;
+        held.stick = sample.hasNunchuk && StickBeyond(sample.stick, kHeldStick);
+        held.clStick = sample.hasClassic && StickBeyond(sample.clLStick, kHeldStick);
+    }
+    held.hold &= sample.hold;
+    held.clHold &= sample.clHold;
+    sample.hold &= ~held.hold;
+    sample.clHold &= ~held.clHold;
+    // The Classic L and R report a full pull with their click.
+    if (held.clHold & kClL) sample.clTriggerL = 0;
+    if (held.clHold & kClR) sample.clTriggerR = 0;
+    if (held.stick && !StickBeyond(sample.stick, kReleasedStick)) held.stick = false;
+    if (held.stick) sample.stick[0] = sample.stick[1] = 0.0f;
+    if (held.clStick && !StickBeyond(sample.clLStick, kReleasedStick)) held.clStick = false;
+    if (held.clStick) {
+        sample.clLStick[0] = sample.clLStick[1] = 0.0f;
+        sample.clLStickRaw[0] = sample.clLStickRaw[1] = 0;
+    }
+}
+
 // What the game sees of the remote on a port. HOME belongs to KartPad, which opens its HOME screen
 // with it, so the game never gets it. While a KartPad screen is open over the game the remote stays
-// connected but reads as idle: buttons up, sticks centred, held at rest.
+// connected but reads as idle: buttons up, sticks centred, held at rest. Once the screen closes, what
+// was still held stays out until it's let go (SuppressHeldOver).
 bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
     if (!ReadKpadSampleFromDevice(chan, sample)) {
         return false;
@@ -746,8 +791,16 @@ bool ReadKpadSample(uint32_t chan, KpadSample& sample) {
         idle.acc[1] = -1.0f;
         idle.nunchukAcc[1] = -1.0f;
         sample = idle;
+        return true;
     }
+    SuppressHeldOver(chan, sample);
     return true;
+}
+
+// Each remote's next sample notes what it's holding, to keep from the game until let go. (A remote
+// that turns up later isn't holding anything over.)
+void IgnoreHeldInput() {
+    for (uint32_t chan = 0; chan < PAD_MAX_CONTROLLERS; ++chan) g_heldOver[chan].capture = IsRemoteChannel(chan);
 }
 
 // Corrected SDL sample and KPAD vector of the remote on a port, for the overlay.

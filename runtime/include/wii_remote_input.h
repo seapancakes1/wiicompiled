@@ -66,6 +66,11 @@ bool IsRemoteChannel(uint32_t chan);
 // Reads the current state of the remote on `chan`; false when IsRemoteChannel
 // is false. During the swap grace period the sample is neutral.
 bool ReadKpadSample(uint32_t chan, KpadSample& sample);
+// The game's input is back after a KartPad screen (or the settings bar) blocked it: what each
+// remote still holds then (the press that closed the screen, buttons another player is holding, a
+// Nunchuk or Classic stick past half way) stays unheard by the game until it's let go, button by
+// button, as Aurora's pad layer does for GameCube pads. Everything else reaches the game at once.
+void IgnoreHeldInput();
 // The remote itself, before KartPad's HOME and input blocking (for the controller tools' readout).
 bool ReadKpadSampleFromDevice(uint32_t chan, KpadSample& sample);
 

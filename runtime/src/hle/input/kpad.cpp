@@ -74,6 +74,9 @@ std::array<std::atomic<bool>, 4> g_keyboardConnected{};
 // shell gives the keyboard to another player (its GameCube port), channel 0 stays connected, so the
 // game doesn't ask for a Wii Remote, but reads as idle.
 std::atomic<bool> g_keyboardDrivesChannel0{true};
+// Set as the game's input comes back after a KartPad screen (KPAD_IgnoreHeldKeys): the keys still
+// held then are kept from the game until they're let go (GameKeyboardState).
+std::atomic<bool> g_ignoreHeldKeys{false};
 std::atomic<bool> g_fixtureArmRequested{false};
 std::atomic<bool> g_preciseMenuPulseRequested{false};
 std::array<std::atomic<uint64_t>, SDL_SCANCODE_COUNT> g_syntheticExpiryNs{};
@@ -606,23 +609,20 @@ float ReadKeyboardAxisLevel(const bool* keys, int keyCount, SDL_Scancode code)
 
 // The keyboard's state as the game reads it: nothing while a KartPad screen is open over the game,
 // and keys still held when it closes (the one that closed it) stay unheard until they're let go, as
-// Aurora's pad layer does for GameCube pads.
+// Aurora's pad layer does for GameCube pads. The other keys reach the game at once.
 const bool* GameKeyboardState(int* keyCount)
 {
     static const bool none[SDL_SCANCODE_COUNT] = {};
-    static bool wasBlocked = false;
     static std::array<bool, SDL_SCANCODE_COUNT> held{};
     static std::array<bool, SDL_SCANCODE_COUNT> filtered{};
     if (InputBindings::InputBlocked()) {
-        wasBlocked = true;
         *keyCount = 0;
         return none;
     }
     int count = 0;
     const bool* keys = SDL_GetKeyboardState(&count);
     count = std::min(count, static_cast<int>(SDL_SCANCODE_COUNT));
-    if (wasBlocked) {
-        wasBlocked = false;
+    if (g_ignoreHeldKeys.exchange(false, std::memory_order_acq_rel)) {
         for (int i = 0; i < count; ++i) held[i] = keys[i];
     }
     bool any = false;
@@ -1005,6 +1005,12 @@ void WriteUnifiedStatus(uint32_t addr, const WiiRemoteInput::KpadSample* sample)
 }
 
 } // namespace
+
+// The settings overlay, as the game's input comes back: keys still held stay unheard until let go.
+extern "C" void KPAD_IgnoreHeldKeys()
+{
+    g_ignoreHeldKeys.store(true, std::memory_order_release);
+}
 
 // The Mac shell: whether the keyboard plays as Player 1 (see g_keyboardDrivesChannel0).
 extern "C" void KartPadSetKeyboardDrivesWiiChannel0(bool drives)

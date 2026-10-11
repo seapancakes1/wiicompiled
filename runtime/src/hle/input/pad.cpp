@@ -99,6 +99,11 @@ void FillTriggersHeldByButtons(PADStatus* statuses) {
                 if (!NativeButtonHeld(gamepad, mapping.nativeButton)) {
                     continue;
                 }
+                // Aurora leaves the L or R bit off while it keeps the press from the game (held
+                // when a KartPad screen closed, or a pad sharing the keyboard's port); so does its pull.
+                if ((statuses[port].button & mapping.padButton) == 0) {
+                    continue;
+                }
                 if (mapping.padButton == PAD_TRIGGER_L) {
                     statuses[port].triggerLeft = 255;
                 } else {

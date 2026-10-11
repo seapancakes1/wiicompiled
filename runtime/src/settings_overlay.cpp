@@ -79,6 +79,7 @@ std::atomic_bool g_nativeSettingsReload{false};
 std::atomic_bool g_nativeCompatibilityRequest{false};
 }
 extern "C" void KartPadRequestSettingsReload() { g_nativeSettingsReload.store(true); }
+extern "C" void KPAD_IgnoreHeldKeys();  // hle/input/kpad.cpp
 // The black "KartPad" screen is up while the game starts (settings_overlay::StartupScreenVisible).
 extern "C" bool KartPadGameStarting() { return settings_overlay::StartupScreenVisible(); }
 extern "C" void KartPadRequestControllerCompatibility() { g_nativeCompatibilityRequest.store(true); }
@@ -1235,6 +1236,7 @@ void PersistDisplayModeIfChanged() {
 }
 
 void ApplyInputBlockState() {
+    static bool wasBlocked = false;
     const bool blocked = controller_mapping_wizard::IsActive() || g_rebind.active ||
                          g_exitPromptOpen || g_topBarVisible || g_compatibilityVisible
 #if defined(__APPLE__) && TARGET_OS_OSX
@@ -1243,6 +1245,15 @@ void ApplyInputBlockState() {
                          ;
     PADBlockInput(blocked);
     InputBindings::SetInputBlocked(blocked);
+    // As the block lifts, whatever is still held (the press that closed a KartPad screen, a button
+    // another player is holding) stays unheard until it's let go, on its own: everything else reaches
+    // the game at once. Aurora's pad layer does it for GameCube pads (PADBlockInput); these are the
+    // Wii Remotes and the keyboard's Wii Remote.
+    if (wasBlocked && !blocked) {
+        WiiRemoteInput::IgnoreHeldInput();
+        KPAD_IgnoreHeldKeys();
+    }
+    wasBlocked = blocked;
 }
 
 bool IsMouseActivity(const SDL_Event& event) {

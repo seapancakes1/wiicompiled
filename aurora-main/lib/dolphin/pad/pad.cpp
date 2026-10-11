@@ -322,6 +322,10 @@ bool g_suppressHeldOnRead = false;
 std::array<PADButton, PAD_CHANMAX> g_suppressedButtons{};
 std::array<bool, PAD_CHANMAX> g_suppressLeftTrigger{};
 std::array<bool, PAD_CHANMAX> g_suppressRightTrigger{};
+// A main stick pushed past half way as the block lifts (still steering the menu that closed) reads
+// centred until it comes back within a quarter of the middle.
+std::array<bool, PAD_CHANMAX> g_suppressStick{};
+constexpr int kHeldStick = 64, kReleasedStick = 32;
 
 bool is_mouse_scancode(const s32 scancode) { return scancode < PAD_KEY_INVALID; }
 bool is_native_binding_pressed(SDL_Gamepad* gamepad, u32 binding) {
@@ -699,11 +703,16 @@ static void neutralize_status(PADStatus& status) {
   status.analogB = 0;
 }
 
+static int stick_extent(const PADStatus& status) {
+  return std::max(std::abs(static_cast<int>(status.stickX)), std::abs(static_cast<int>(status.stickY)));
+}
+
 static void apply_unblock_suppression(PADStatus& status, const u32 port, const bool captureHeldInput) {
   if (captureHeldInput) {
     g_suppressedButtons[port] |= status.button;
     g_suppressLeftTrigger[port] = g_suppressLeftTrigger[port] || status.triggerLeft > ClampRegion.minTrigger;
     g_suppressRightTrigger[port] = g_suppressRightTrigger[port] || status.triggerRight > ClampRegion.minTrigger;
+    g_suppressStick[port] = g_suppressStick[port] || stick_extent(status) > kHeldStick;
   }
 
   g_suppressedButtons[port] &= status.button;
@@ -722,6 +731,15 @@ static void apply_unblock_suppression(PADStatus& status, const u32 port, const b
       g_suppressRightTrigger[port] = false;
     } else {
       status.triggerRight = 0;
+    }
+  }
+
+  if (g_suppressStick[port]) {
+    if (stick_extent(status) <= kReleasedStick) {
+      g_suppressStick[port] = false;
+    } else {
+      status.stickX = 0;
+      status.stickY = 0;
     }
   }
 }
@@ -747,6 +765,7 @@ u32 PADRead(PADStatus* status) {
       g_suppressedButtons[i] = 0;
       g_suppressLeftTrigger[i] = false;
       g_suppressRightTrigger[i] = false;
+      g_suppressStick[i] = false;
       continue;
     }
 
