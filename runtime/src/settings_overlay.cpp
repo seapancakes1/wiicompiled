@@ -1162,10 +1162,9 @@ bool AutomationMuted() {
     return muted;
 }
 
-void ReloadNativeSettings() {
-    if (!g_nativeSettingsReload.exchange(false)) return;
-    const auto c = RuntimeConfigFile::LoadConfigFile();
-    RuntimeConfigFile::Mutable() = c;
+// The settings the renderer takes up on a frame of its own: full screen, picture quality, smoother
+// motion, the picture's filters and effects, the frame rate counter.
+void ApplyPictureSettings(const RuntimeUserConfig& c) {
     const float resolution = c.resolutionMultiplier.value_or(1.0f);
     if (resolution != g_resolutionScale) {
         g_resolutionScale = resolution;
@@ -1186,13 +1185,17 @@ void ReloadNativeSettings() {
             RuntimeConfigFile::SetDisplayMode(std::string(kDisplayModeConfigNames[g_displayMode]));
     }
     g_showFps = c.showFps.value_or(true);
-    g_cursorAutoHideSeconds = c.cursorAutoHideSeconds.value_or(3);
     g_disableCopyFilter = c.disableCopyFilter.value_or(true);
     g_skipUnreadyPipelines = c.skipUnreadyPipelines.value_or(true);
     aurora_set_disable_copy_filter(g_disableCopyFilter);
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     g_disabledPostProcessingPaths = c.disabledPostProcessingPaths.value_or(0);
     RuntimeGameGraphicsOptions::SetDisabledPostProcessingPaths(g_disabledPostProcessingPaths);
+}
+
+// Sound, vibration, Discord and the pointer, which need no frame.
+void ApplyOtherSettings(const RuntimeUserConfig& c) {
+    g_cursorAutoHideSeconds = c.cursorAutoHideSeconds.value_or(3);
     DiscordPresence::SetEnabled(RuntimeConfigFile::DiscordPresenceEnabled());
     const auto percent = [](float v) { return static_cast<int>(std::lround(std::clamp(v, 0.0f, 1.0f) * 100)); };
     g_audioVolumePercent = percent(c.audioVolume.value_or(1));
@@ -1224,6 +1227,43 @@ void ReloadNativeSettings() {
         AxDspHle::SetMixWorkerEnabled(g_audioMixWorker);
     }
 }
+
+// Whether a reloaded config changes anything ApplyPictureSettings applies.
+bool PictureSettingsChanged(const RuntimeUserConfig& c) {
+    const uint32_t fps = c.frameInterpolationFps.value_or(0);
+    const auto mode = c.displayMode.value_or("windowed");
+    const int display = mode == "borderless" ? 1 : mode == "exclusive" ? 2 : 0;
+    return c.resolutionMultiplier.value_or(1.0f) != g_resolutionScale ||
+           (fps == 120 ? 1 : fps == 180 ? 2 : 0) != g_frameInterpolationMode || display != g_displayMode ||
+           c.showFps.value_or(true) != g_showFps || c.disableCopyFilter.value_or(true) != g_disableCopyFilter ||
+           c.skipUnreadyPipelines.value_or(true) != g_skipUnreadyPipelines ||
+           c.disabledPostProcessingPaths.value_or(0) != g_disabledPostProcessingPaths;
+}
+
+void ReloadNativeSettings() {
+    if (!g_nativeSettingsReload.exchange(false)) return;
+    const auto c = RuntimeConfigFile::LoadConfigFile();
+    RuntimeConfigFile::Mutable() = c;
+    ApplyPictureSettings(c);
+    ApplyOtherSettings(c);
+}
+
+#if defined(__APPLE__) && TARGET_OS_OSX
+// While a KartPad screen holds the game: a settings change applies here, the game still held (a
+// dragged volume slider writes many). False for one the picture needs, which stays pending: the
+// frame let through applies it (Draw), after the renderer's own frame is done.
+bool ReloadSettingsWhileHeld() {
+    if (!g_nativeSettingsReload.exchange(false)) return true;
+    const auto c = RuntimeConfigFile::LoadConfigFile();
+    if (PictureSettingsChanged(c)) {
+        g_nativeSettingsReload.store(true);
+        return false;
+    }
+    RuntimeConfigFile::Mutable() = c;
+    ApplyOtherSettings(c);
+    return true;
+}
+#endif
 
 // Persist display changes made by the platform fullscreen shortcut.
 void PersistDisplayModeIfChanged() {
@@ -1424,15 +1464,17 @@ void HoldGameAudio(bool held) {
 
 // A KartPad screen over the game holds it still. Unlike the background pause, Aurora keeps taking
 // its events (controllers connecting, the window changing) and the shell keeps reading the pads and
-// drawing its screen; the game draws nothing, so its last frame stays under the screen. A settings
-// change (volume, full screen) lets one frame through to apply it, then the hold resumes.
+// drawing its screen; the game draws nothing, so its last frame stays under the screen. Settings
+// changes apply while it holds (ReloadSettingsWhileHeld); one to the picture (full screen, picture
+// quality) lets one frame through to show it, then the hold resumes.
 bool WaitWhileOverlayOpen() {
     constexpr std::array<uint32_t, PAD_MAX_CONTROLLERS> stopAll{
         PAD_MOTOR_STOP, PAD_MOTOR_STOP, PAD_MOTOR_STOP, PAD_MOTOR_STOP};
     PADControlAllMotors(stopAll.data());
     ApplyInputBlockState();
     HoldGameAudio(true);
-    while (KartPadOverlayPauseWanted() && !g_nativeSettingsReload.load() && !Network_HLE_HasOpenSockets()) {
+    while (KartPadOverlayPauseWanted() && !Network_HLE_HasOpenSockets()) {
+        if (!ReloadSettingsWhileHeld()) break;
         SDL_WaitEventTimeout(nullptr, 16);
         UpdateAuroraAndProcessEvents();
         KartPadControllersTick();
