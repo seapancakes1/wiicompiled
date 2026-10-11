@@ -1495,9 +1495,10 @@ int RuntimeMain(int argc, char** argv) {
         const char* activeProfile = RuntimeProduct::IsRetroRewind() ? "retro_rewind" : "base";
         RecompMod::ActivateProfile(activeProfile);
         TranslatedFunctionRegistry::SelectProfile(activeProfile);
-        if (RuntimeConfigFile::DiscordPresenceEnabled()) {
-            DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(), "Mario Kart Wii");
-        }
+        // Started even when off: Settings can turn it on mid-game.
+        DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(),
+                                    std::string(RuntimeProduct::Active().displayName),
+                                    RuntimeConfigFile::DiscordPresenceEnabled());
         SystemBridge::Initialize();
         TranslatedFunctionRegistry::Finalize();
 

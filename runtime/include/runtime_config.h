@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -319,11 +320,46 @@ inline std::filesystem::path ResolveConfigPath() {
     return ApplicationDataDirectory() / kConfigFileName;
 }
 
+// The [discord] block configs were written with before Rich Presence was on
+// by default, and the one they get now. An untouched old block moves to the
+// new default once; one the player has edited stays as it is.
+inline constexpr std::string_view kDiscordOffByDefaultBlock =
+    "[discord]\n"
+    "# Rich Presence talks only to a locally-running Discord client.\n"
+    "# Retro Rewind supplies its official app ID automatically. Set this\n"
+    "# to WiiCompiled's Discord application ID for basic base-game presence.\n"
+    "enabled = false\n";
+inline constexpr std::string_view kDiscordBlock =
+    "[discord]\n"
+    "# Shows what you're playing in the Discord app on this computer. The base\n"
+    "# game uses WiiCompiled's Discord application, Retro Rewind its own.\n"
+    "enabled = true\n";
+
+inline void UpgradeDiscordDefault(const std::filesystem::path& path) {
+    std::string text;
+    {
+        std::ifstream input(path, std::ios::binary);
+        text.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
+    const size_t at = text.find(kDiscordOffByDefaultBlock);
+    if (at == std::string::npos) {
+        return;
+    }
+    text.replace(at, kDiscordOffByDefaultBlock.size(), kDiscordBlock);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << text;
+}
+
 inline void EnsureConfigFile() {
     const std::filesystem::path path = ResolveConfigPath();
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec || std::filesystem::exists(path, ec)) {
+        if (!ec) {
+            // Once a run: every settings reload comes through here.
+            static const bool upgraded = (UpgradeDiscordDefault(path), true);
+            (void)upgraded;
+        }
         return;
     }
 
@@ -364,12 +400,8 @@ inline void EnsureConfigFile() {
               "mix_worker = true\n\n"
               "[network]\n"
               "enabled = true\n\n"
-              "[discord]\n"
-              "# Rich Presence talks only to a locally-running Discord client.\n"
-              "# Retro Rewind supplies its official app ID automatically. Set this\n"
-              "# to WiiCompiled's Discord application ID for basic base-game presence.\n"
-              "enabled = false\n"
-              "# client_id = \"123456789012345678\"\n\n"
+           << kDiscordBlock
+           << "# client_id = \"123456789012345678\"\n\n"
               "[paths]\n"
               "# dvd_root = \"D:\\\\MarioKartWii\\\\DATA\"\n"
               "# nand_root = \"D:\\\\WiiNand\"\n"
@@ -1029,7 +1061,7 @@ inline std::string RetroRewindRoot(std::string fallback = "") {
     return Get().retroRewindRoot.value_or(std::move(fallback));
 }
 
-inline bool DiscordPresenceEnabled(bool fallback = false) {
+inline bool DiscordPresenceEnabled(bool fallback = true) {
     return Get().discordPresenceEnabled.value_or(fallback);
 }
 

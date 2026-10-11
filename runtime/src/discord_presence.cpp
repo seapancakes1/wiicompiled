@@ -6,6 +6,8 @@
 #include <array>
 #include <chrono>
 #include <cctype>
+#include <cerrno>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +15,7 @@
 #include <optional>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,6 +37,7 @@ constexpr uint32_t kHandshakeOpcode = 0;
 constexpr uint32_t kFrameOpcode = 1;
 constexpr size_t kMaxClientIdLength = 32;
 constexpr auto kConnectionRetryCooldown = std::chrono::seconds(1);
+constexpr auto kReconnectInterval = std::chrono::seconds(15);
 
 bool IsClientId(std::string_view value) {
     return !value.empty() && value.size() <= kMaxClientIdLength &&
@@ -136,126 +140,200 @@ std::string BuildActivityPayload(const Activity& activity) {
 
 class Client {
 public:
-    void Initialize(const std::string& clientId, const std::string& title) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        basicClientId_ = IsClientId(clientId) ? clientId : std::string{};
-        basicActivity_ = {};
-        basicActivity_.details = title;
-        basicActivity_.startTimestamp = UnixSeconds();
-        customClient_ = false;
-        activity_ = basicActivity_;
-        ReconnectAndSendLocked();
+    void Initialize(const std::string& clientId, const std::string& title, bool enabled) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            basicClientId_ = IsClientId(clientId) ? clientId : std::string{};
+            basicActivity_ = {};
+            basicActivity_.details = title;
+            basicActivity_.startTimestamp = UnixSeconds();
+            customClient_ = false;
+            clientId_.clear();
+            activity_ = basicActivity_;
+            enabled_ = enabled;
+            changed_ = true;
+            if (!worker_.joinable()) {
+                stopping_ = false;
+                worker_ = std::thread([this] { Run(); });
+            }
+        }
+        wake_.notify_one();
+    }
+
+    void SetEnabled(bool enabled) {
+        Change([&] {
+            if (enabled_ == enabled) {
+                return false;
+            }
+            enabled_ = enabled;
+            return true;
+        });
     }
 
     void SetClient(const std::string& clientId) {
-        std::lock_guard<std::mutex> lock(mutex_);
         if (!IsClientId(clientId)) {
             RT_LOG(RT_TAG_RUNTIME) << "Ignoring invalid Discord client ID from /dev/dolphin" << std::endl;
             return;
         }
-        if (clientId_ == clientId && connected_) {
-            return;
-        }
-        customClient_ = true;
-        clientId_ = clientId;
-        CloseLocked();
-        ReconnectAndSendLocked();
+        Change([&] {
+            if (customClient_ && clientId_ == clientId) {
+                return false;
+            }
+            customClient_ = true;
+            clientId_ = clientId;
+            return true;
+        });
     }
 
     void SetActivity(Activity activity) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!customClient_) {
-            return;
-        }
-        activity_ = std::move(activity);
-        SendActivityLocked();
+        Change([&] {
+            if (!customClient_) {
+                return false;
+            }
+            activity_ = std::move(activity);
+            return true;
+        });
+    }
+
+    void SetBasicActivity(const std::string& details, const std::string& state) {
+        Change([&] {
+            if (basicActivity_.details == details && basicActivity_.state == state) {
+                return false;
+            }
+            basicActivity_.details = details;
+            basicActivity_.state = state;
+            if (customClient_) {
+                return false;
+            }
+            activity_ = basicActivity_;
+            return true;
+        });
     }
 
     void Reset() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        customClient_ = false;
-        clientId_.clear();
-        activity_ = basicActivity_;
-        CloseLocked();
-        ReconnectAndSendLocked();
+        Change([&] {
+            customClient_ = false;
+            clientId_.clear();
+            activity_ = basicActivity_;
+            return true;
+        });
     }
 
     void Shutdown() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        CloseLocked();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        wake_.notify_one();
+        if (worker_.joinable()) {
+            worker_.join();
+        }
     }
 
 private:
+    struct Wanted {
+        bool enabled = false;
+        std::string clientId;
+        Activity activity;
+    };
+
     static int64_t UnixSeconds() {
         return std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
     }
 
-    std::string ActiveClientIdLocked() const {
-        return customClient_ ? clientId_ : basicClientId_;
+    // update returns whether it changed what Discord should show.
+    template <typename Update>
+    void Change(Update update) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!update()) {
+                return;
+            }
+            changed_ = true;
+        }
+        wake_.notify_one();
     }
 
-    bool WriteFrameLocked(uint32_t opcode, std::string_view payload) {
+    // The worker sends each change as it comes. In between it notices Discord
+    // quitting and tries again now and then, so a Discord opened after the
+    // game still gets the status. Only the worker touches the connection.
+    void Run() {
+        for (;;) {
+            Wanted wanted;
+            bool changed = false;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                wake_.wait_for(lock, kReconnectInterval, [this] { return stopping_ || changed_; });
+                if (stopping_) {
+                    break;
+                }
+                changed = std::exchange(changed_, false);
+                wanted.enabled = enabled_;
+                wanted.clientId = customClient_ ? clientId_ : basicClientId_;
+                wanted.activity = activity_;
+            }
+            Apply(wanted, changed);
+        }
+        Close();
+    }
+
+    void Apply(const Wanted& wanted, bool changed) {
+        if (!wanted.enabled || wanted.clientId.empty()) {
+            Close();
+            return;
+        }
+        if (connected_ && (connectedClientId_ != wanted.clientId || !Drain())) {
+            Close();
+        }
+        if (!connected_) {
+            if (!Connect(wanted.clientId)) {
+                return;
+            }
+            // A new connection starts without a status.
+            changed = true;
+        }
+        if (changed && !WriteFrame(kFrameOpcode, BuildActivityPayload(wanted.activity))) {
+            Close();
+        }
+    }
+
+    bool Connect(const std::string& clientId) {
+        if (!ConnectionRetryAllowed() || !ConnectSocket()) {
+            return false;
+        }
+        const std::string handshake = "{\"v\":1,\"client_id\":\"" + clientId + "\"}";
+        if (!WriteFrame(kHandshakeOpcode, handshake) || !ReadReady()) {
+            RecordFailedConnection();
+            Close();
+            return false;
+        }
+        connectedClientId_ = clientId;
+        return true;
+    }
+
+    bool WriteFrame(uint32_t opcode, std::string_view payload) {
         std::array<uint8_t, 8> header{};
         const uint32_t size = static_cast<uint32_t>(payload.size());
         for (size_t i = 0; i < 4; ++i) {
             header[i] = static_cast<uint8_t>(opcode >> (i * 8));
             header[4 + i] = static_cast<uint8_t>(size >> (i * 8));
         }
-        return WriteAllLocked(header.data(), header.size()) &&
-               WriteAllLocked(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+        return WriteAll(header.data(), header.size()) &&
+               WriteAll(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
     }
 
-    void ReconnectAndSendLocked() {
-        const std::string clientId = ActiveClientIdLocked();
-        if (clientId.empty() || !ConnectLocked()) {
-            return;
-        }
-        const std::string handshake = "{\"v\":1,\"client_id\":\"" + clientId + "\"}";
-        if (!WriteFrameLocked(kHandshakeOpcode, handshake)) {
-            RecordFailedConnectionLocked();
-            CloseLocked();
-            return;
-        }
-        if (!ReadReadyLocked()) {
-            RecordFailedConnectionLocked();
-            CloseLocked();
-            return;
-        }
-        SendActivityLocked();
-    }
-
-    void SendActivityLocked() {
-        if (!connected_) {
-            ReconnectAndSendLocked();
-            return;
-        }
-        if (ActiveClientIdLocked().empty()) {
-            return;
-        }
-        if (!WriteFrameLocked(kFrameOpcode, BuildActivityPayload(activity_))) {
-            RecordFailedConnectionLocked();
-            CloseLocked();
-        }
-    }
-
-    bool ConnectionRetryAllowedLocked() const {
+    bool ConnectionRetryAllowed() const {
         return !lastFailedConnectionAttempt_ ||
                std::chrono::steady_clock::now() - *lastFailedConnectionAttempt_ >= kConnectionRetryCooldown;
     }
 
-    void RecordFailedConnectionLocked() {
+    void RecordFailedConnection() {
         lastFailedConnectionAttempt_ = std::chrono::steady_clock::now();
     }
 
 #if defined(_WIN32)
-    bool ConnectLocked() {
-        if (connected_) {
-            return true;
-        }
-        if (!ConnectionRetryAllowedLocked()) {
-            return false;
-        }
+    bool ConnectSocket() {
         for (unsigned int index = 0; index < 10; ++index) {
             const std::string name = "\\\\.\\pipe\\discord-ipc-" + std::to_string(index);
             handle_ = ::CreateFileA(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -267,11 +345,11 @@ private:
                 return true;
             }
         }
-        RecordFailedConnectionLocked();
+        RecordFailedConnection();
         return false;
     }
 
-    bool WriteAllLocked(const uint8_t* data, size_t size) {
+    bool WriteAll(const uint8_t* data, size_t size) {
         while (size != 0) {
             DWORD written = 0;
             if (!::WriteFile(handle_, data, static_cast<DWORD>(size), &written, nullptr) || written == 0) {
@@ -283,7 +361,7 @@ private:
         return true;
     }
 
-    bool ReadAllLocked(uint8_t* data, size_t size) {
+    bool ReadAll(uint8_t* data, size_t size) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         while (size != 0) {
             if (std::chrono::steady_clock::now() >= deadline) {
@@ -311,7 +389,27 @@ private:
         return true;
     }
 
-    void CloseLocked() {
+    // Discord answers every command. Reads and drops the answers without
+    // waiting; false once Discord has closed its end.
+    bool Drain() {
+        std::array<uint8_t, 4096> buffer{};
+        for (;;) {
+            DWORD available = 0;
+            if (!::PeekNamedPipe(handle_, nullptr, 0, nullptr, &available, nullptr)) {
+                return false;
+            }
+            if (available == 0) {
+                return true;
+            }
+            DWORD read = 0;
+            const DWORD requested = static_cast<DWORD>(std::min<size_t>(buffer.size(), available));
+            if (!::ReadFile(handle_, buffer.data(), requested, &read, nullptr) || read == 0) {
+                return false;
+            }
+        }
+    }
+
+    void Close() {
         if (handle_ != INVALID_HANDLE_VALUE) {
             ::CloseHandle(handle_);
             handle_ = INVALID_HANDLE_VALUE;
@@ -321,13 +419,7 @@ private:
 
     HANDLE handle_ = INVALID_HANDLE_VALUE;
 #else
-    bool ConnectLocked() {
-        if (connected_) {
-            return true;
-        }
-        if (!ConnectionRetryAllowedLocked()) {
-            return false;
-        }
+    bool ConnectSocket() {
         std::array<std::string, 5> roots{};
         size_t rootCount = 0;
         if (const char* runtimeDir = std::getenv("XDG_RUNTIME_DIR"); runtimeDir && *runtimeDir) {
@@ -357,9 +449,11 @@ private:
                 address.sun_family = AF_UNIX;
                 std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
                 if (::connect(socketFd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) {
+                    // A Discord that stops reading can't hold the worker (or Shutdown) for long.
                     timeval timeout{};
                     timeout.tv_sec = 1;
                     ::setsockopt(socketFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+                    ::setsockopt(socketFd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
                     fd_ = socketFd;
                     connected_ = true;
                     lastFailedConnectionAttempt_.reset();
@@ -368,11 +462,11 @@ private:
                 ::close(socketFd);
             }
         }
-        RecordFailedConnectionLocked();
+        RecordFailedConnection();
         return false;
     }
 
-    bool WriteAllLocked(const uint8_t* data, size_t size) {
+    bool WriteAll(const uint8_t* data, size_t size) {
         while (size != 0) {
             const ssize_t written = ::send(fd_, data, size, MSG_NOSIGNAL);
             if (written <= 0) {
@@ -384,7 +478,7 @@ private:
         return true;
     }
 
-    bool ReadAllLocked(uint8_t* data, size_t size) {
+    bool ReadAll(uint8_t* data, size_t size) {
         while (size != 0) {
             const ssize_t read = ::recv(fd_, data, size, 0);
             if (read <= 0) {
@@ -396,7 +490,20 @@ private:
         return true;
     }
 
-    void CloseLocked() {
+    // Discord answers every command. Reads and drops the answers without
+    // waiting; false once Discord has closed its end.
+    bool Drain() {
+        std::array<uint8_t, 4096> buffer{};
+        for (;;) {
+            const ssize_t read = ::recv(fd_, buffer.data(), buffer.size(), MSG_DONTWAIT);
+            if (read > 0) {
+                continue;
+            }
+            return read < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+        }
+    }
+
+    void Close() {
         if (fd_ >= 0) {
             ::close(fd_);
             fd_ = -1;
@@ -407,9 +514,9 @@ private:
     int fd_ = -1;
 #endif
 
-    bool ReadReadyLocked() {
+    bool ReadReady() {
         std::array<uint8_t, 8> header{};
-        if (!ReadAllLocked(header.data(), header.size())) {
+        if (!ReadAll(header.data(), header.size())) {
             return false;
         }
         uint32_t opcode = 0;
@@ -422,45 +529,66 @@ private:
             return false;
         }
         std::vector<uint8_t> payload(size);
-        if (!ReadAllLocked(payload.data(), payload.size())) {
+        if (!ReadAll(payload.data(), payload.size())) {
             return false;
         }
         const std::string_view json(reinterpret_cast<const char*>(payload.data()), payload.size());
         return json.find("\"evt\":\"READY\"") != std::string_view::npos;
     }
 
+    // What Discord should show, guarded by mutex_.
     std::mutex mutex_;
-    bool connected_ = false;
+    std::condition_variable wake_;
+    bool enabled_ = false;
+    bool changed_ = false;
+    bool stopping_ = false;
     bool customClient_ = false;
-    std::optional<std::chrono::steady_clock::time_point> lastFailedConnectionAttempt_;
     std::string basicClientId_;
     std::string clientId_;
     Activity basicActivity_;
     Activity activity_;
+    std::thread worker_;
+
+    // The connection, the worker's alone.
+    bool connected_ = false;
+    std::string connectedClientId_;
+    std::optional<std::chrono::steady_clock::time_point> lastFailedConnectionAttempt_;
 };
 
-Client g_client;
+// Never destroyed: a worker still running at exit must not meet a destroyed std::thread.
+Client& TheClient() {
+    static Client* client = new Client;
+    return *client;
+}
 
 } // namespace
 
-void Initialize(const std::string& basicClientId, const std::string& basicTitle) {
-    g_client.Initialize(basicClientId, basicTitle);
+void Initialize(const std::string& basicClientId, const std::string& basicTitle, bool enabled) {
+    TheClient().Initialize(basicClientId, basicTitle, enabled);
+}
+
+void SetEnabled(bool enabled) {
+    TheClient().SetEnabled(enabled);
 }
 
 void SetClient(const std::string& clientId) {
-    g_client.SetClient(clientId);
+    TheClient().SetClient(clientId);
 }
 
 void SetActivity(Activity activity) {
-    g_client.SetActivity(std::move(activity));
+    TheClient().SetActivity(std::move(activity));
+}
+
+void SetBasicActivity(const std::string& details, const std::string& state) {
+    TheClient().SetBasicActivity(details, state);
 }
 
 void Reset() {
-    g_client.Reset();
+    TheClient().Reset();
 }
 
 void Shutdown() {
-    g_client.Shutdown();
+    TheClient().Shutdown();
 }
 
 } // namespace DiscordPresence

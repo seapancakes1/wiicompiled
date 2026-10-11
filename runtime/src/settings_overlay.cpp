@@ -6,6 +6,7 @@ extern "C" void KartPadOpenSettingsFromShortcut();
 #include "aurora_events.h"
 #include "controller_button_names.h"
 #include "controller_mapping_wizard.h"
+#include "discord_presence.h"
 #include "input_bindings.h"
 #include "game_graphics_options.h"
 #include "music_attenuation.h"
@@ -1191,6 +1192,7 @@ void ReloadNativeSettings() {
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     g_disabledPostProcessingPaths = c.disabledPostProcessingPaths.value_or(0);
     RuntimeGameGraphicsOptions::SetDisabledPostProcessingPaths(g_disabledPostProcessingPaths);
+    DiscordPresence::SetEnabled(RuntimeConfigFile::DiscordPresenceEnabled());
     const auto percent = [](float v) { return static_cast<int>(std::lround(std::clamp(v, 0.0f, 1.0f) * 100)); };
     g_audioVolumePercent = percent(c.audioVolume.value_or(1));
     g_musicVolumePercent = percent(c.audioMusicVolume.value_or(1));
