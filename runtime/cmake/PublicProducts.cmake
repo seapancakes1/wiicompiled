@@ -299,13 +299,22 @@ if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND MKW_KARTPAD_REPO_ROOT)
     set_source_files_properties("${MKW_KARTPAD_MACOS_SHELL}"
         "${MKW_KARTPAD_WIIMOTE_PAIRING}" "${MKW_KARTPAD_MII_MANAGER}"
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS TRUE)
-    # Phone controllers' WebRTC link (libdatachannel), declared in the KartPad repository.
+    # Phone controllers' WebRTC link (libdatachannel), declared in the KartPad repository, and where
+    # their tilt page is published (KARTPAD_PHONE_PAGE_URL, empty for none), for the one source that
+    # uses it, which every Mac product shares.
     include("${MKW_KARTPAD_REPO_ROOT}/cmake/KartPadPhoneLink.cmake")
+    set_property(SOURCE "${MKW_KARTPAD_MACOS_SHELL}" APPEND PROPERTY COMPILE_DEFINITIONS
+        "KARTPAD_PHONE_PAGE_URL=\"${KARTPAD_PHONE_PAGE_URL}\"")
+    # The shell's automated-check commands (apple/macos/KartPadQA.inc.mm), for test builds only.
+    option(KARTPAD_QA_HOOKS "Build the Mac shell's automated-check commands (KARTPAD_QA_DIR)" OFF)
+    if(KARTPAD_QA_HOOKS)
+        set_property(SOURCE "${MKW_KARTPAD_MACOS_SHELL}" APPEND PROPERTY COMPILE_DEFINITIONS KARTPAD_QA_HOOKS=1)
+    endif()
     target_link_libraries(WiiCompiled PRIVATE
         "-framework AppKit" "-framework UniformTypeIdentifiers"
         "-framework IOBluetooth" "-framework IOKit"
-            "-framework Network" "-framework CoreImage"
-            kartpad_phone_link)
+        "-framework Network" "-framework CoreImage"
+        kartpad_phone_link)
 endif()
 
 if(MKW_HAVE_RETRO_REWIND)
