@@ -43,6 +43,9 @@ struct PortPreference {
 };
 
 std::array<PortPreference, PAD_MAX_CONTROLLERS> g_portPreferences;
+// What controller_ports.dat holds. g_portPreferences is what's in effect, and differs only where a
+// virtual pad (a phone) holds a player for this session.
+std::array<PortPreference, PAD_MAX_CONTROLLERS> g_savedPortPreferences;
 bool g_portPreferencesLoaded = false;
 
 std::string port_preferences_path() {
@@ -141,6 +144,15 @@ bool read_identity(SDL_IOStream* file, ControllerIdentity& identity) {
   return read_string(file, identity.guid) && read_string(file, identity.serial);
 }
 
+// SDL virtual joysticks (KartPad's phone controllers, test pads) last one session. They keep their
+// player only until they go, never between launches, so a phone that joined first can't hold
+// Player 1 against a real controller next time. SDL's virtual bus is 0xFF, in the GUID's first two
+// bytes.
+bool is_virtual_identity(const ControllerIdentity& identity) {
+  const SDL_GUID guid = SDL_StringToGUID(identity.guid.c_str());
+  return (guid.data[0] | (guid.data[1] << 8)) == 0xFF;
+}
+
 bool write_identity(SDL_IOStream* file, const ControllerIdentity& identity) {
   return write_string(file, identity.guid) && write_string(file, identity.serial);
 }
@@ -188,6 +200,13 @@ void ensure_port_preferences_loaded() {
   if (read_port_preferences_file(preferences)) {
     g_portPreferences = std::move(preferences);
   }
+  // Saved before virtual pads were left out: forget them.
+  for (auto& preference : g_portPreferences) {
+    if (preference.state == PortPreferenceState::Controller && is_virtual_identity(preference.identity)) {
+      preference = {};
+    }
+  }
+  g_savedPortPreferences = g_portPreferences;
   g_portPreferencesLoaded = true;
 }
 
@@ -209,7 +228,7 @@ void save_port_preferences() {
   }
 
   bool ok = write_value(file, kPortPreferencesMagic) && write_value(file, kPortPreferencesVersion);
-  for (const auto& preference : g_portPreferences) {
+  for (const auto& preference : g_savedPortPreferences) {
     const auto state = static_cast<uint8_t>(preference.state);
     ok = ok && write_value(file, state) && write_identity(file, preference.identity);
   }
@@ -446,6 +465,17 @@ bool refresh_controller(SDL_JoystickID instance) noexcept {
 void remove_controller(Uint32 instance) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
     Log.info("Controller disconnected: instance {}", instance);
+    if (SDL_IsJoystickVirtual(instance)) {
+      // A phone that has gone for good gives its player back to whoever had it saved.
+      const auto identity = controller_identity(it->second);
+      for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+        const auto& preference = g_portPreferences[port];
+        if (preference.state == PortPreferenceState::Controller && preference.identity.guid == identity.guid &&
+            preference.identity.serial == identity.serial) {
+          release_session_player(port);
+        }
+      }
+    }
     SDL_CloseGamepad(it->second.m_controller);
     g_GameControllers.erase(it);
     apply_port_preferences();
@@ -513,14 +543,28 @@ void persist_controller_for_player(uint32_t player, const GameController* contro
   }
 
   ensure_port_preferences_loaded();
+  PortPreference preference;
   if (controller != nullptr) {
-    g_portPreferences[player].state = PortPreferenceState::Controller;
-    g_portPreferences[player].identity = controller_identity(*controller);
+    preference.state = PortPreferenceState::Controller;
+    preference.identity = controller_identity(*controller);
   } else {
-    g_portPreferences[player].state = PortPreferenceState::None;
-    g_portPreferences[player].identity = {};
+    preference.state = PortPreferenceState::None;
   }
+  g_portPreferences[player] = preference;
+  // A virtual pad holds the player for this session; what's saved stays as it was.
+  if (controller != nullptr && SDL_IsJoystickVirtual(controller->m_index)) {
+    return;
+  }
+  g_savedPortPreferences[player] = preference;
   save_port_preferences();
+}
+
+void release_session_player(uint32_t player) noexcept {
+  if (player >= PAD_MAX_CONTROLLERS) {
+    return;
+  }
+  ensure_port_preferences_loaded();
+  g_portPreferences[player] = g_savedPortPreferences[player];
 }
 
 void initialize() noexcept {

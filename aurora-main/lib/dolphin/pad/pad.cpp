@@ -415,7 +415,12 @@ void PADSetPortForIndex(const u32 idx, const u32 port) {
     aurora::input::set_player_index(dest->m_index, -1);
   }
   if (oldPort >= 0 && oldPort != static_cast<int32_t>(port)) {
-    aurora::input::persist_controller_for_player(oldPort, nullptr);
+    // A virtual pad (a phone) holds players for this session only: its old one goes back as it was saved.
+    if (SDL_IsJoystickVirtual(ctrl->m_index)) {
+      aurora::input::release_session_player(oldPort);
+    } else {
+      aurora::input::persist_controller_for_player(oldPort, nullptr);
+    }
   }
   aurora::input::set_player_index(ctrl->m_index, static_cast<Sint32>(port));
   aurora::input::persist_controller_for_player(port, ctrl);
@@ -438,8 +443,12 @@ int32_t PADGetIndexForPort(const u32 port) {
 }
 
 void PADClearPort(const u32 port) {
-  aurora::input::persist_controller_for_player(port, nullptr);
   const auto* ctrl = aurora::input::get_controller_for_player(port);
+  if (ctrl != nullptr && SDL_IsJoystickVirtual(ctrl->m_index)) {
+    aurora::input::release_session_player(port);
+  } else {
+    aurora::input::persist_controller_for_player(port, nullptr);
+  }
   if (ctrl == nullptr) {
     return;
   }

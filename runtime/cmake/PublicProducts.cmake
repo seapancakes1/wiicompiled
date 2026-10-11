@@ -299,9 +299,13 @@ if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND MKW_KARTPAD_REPO_ROOT)
     set_source_files_properties("${MKW_KARTPAD_MACOS_SHELL}"
         "${MKW_KARTPAD_WIIMOTE_PAIRING}" "${MKW_KARTPAD_MII_MANAGER}"
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc" SKIP_PRECOMPILE_HEADERS TRUE)
+    # Phone controllers' WebRTC link (libdatachannel), declared in the KartPad repository.
+    include("${MKW_KARTPAD_REPO_ROOT}/cmake/KartPadPhoneLink.cmake")
     target_link_libraries(WiiCompiled PRIVATE
         "-framework AppKit" "-framework UniformTypeIdentifiers"
-        "-framework IOBluetooth" "-framework IOKit")
+        "-framework IOBluetooth" "-framework IOKit"
+            "-framework Network" "-framework CoreImage"
+            kartpad_phone_link)
 endif()
 
 if(MKW_HAVE_RETRO_REWIND)
@@ -323,7 +327,9 @@ if(MKW_HAVE_RETRO_REWIND)
             "${MKW_KARTPAD_REPO_ROOT}/runtime/include")
         target_link_libraries(RetroRewind PRIVATE
             "-framework AppKit" "-framework UniformTypeIdentifiers"
-            "-framework IOBluetooth" "-framework IOKit")
+            "-framework IOBluetooth" "-framework IOKit"
+            "-framework Network" "-framework CoreImage"
+            kartpad_phone_link)
     endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND
        DEFINED MKW_KARTPAD_MOBILE_SOURCES AND MKW_KARTPAD_MOBILE_SOURCES)
@@ -414,7 +420,9 @@ if(MKW_HAVE_RETRO_REWIND)
         target_compile_definitions(KartPadDual PRIVATE KARTPAD_RUNTIME_PRODUCT_DUAL=1)
         target_link_libraries(KartPadDual PRIVATE
             "-framework AppKit" "-framework UniformTypeIdentifiers"
-            "-framework IOBluetooth" "-framework IOKit")
+            "-framework IOBluetooth" "-framework IOKit"
+            "-framework Network" "-framework CoreImage"
+            kartpad_phone_link)
     endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND
        DEFINED MKW_KARTPAD_MOBILE_SOURCES AND MKW_KARTPAD_MOBILE_SOURCES)
