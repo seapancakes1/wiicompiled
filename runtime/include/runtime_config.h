@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -11,7 +13,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -35,6 +36,8 @@
 #include <shlobj.h>
 #else
 #include <cstdlib>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -320,34 +323,73 @@ inline std::filesystem::path ResolveConfigPath() {
     return ApplicationDataDirectory() / kConfigFileName;
 }
 
-// The [discord] block configs were written with before Rich Presence was on
-// by default, and the one they get now. An untouched old block moves to the
-// new default once; one the player has edited stays as it is.
-inline constexpr std::string_view kDiscordOffByDefaultBlock =
-    "[discord]\n"
-    "# Rich Presence talks only to a locally-running Discord client.\n"
-    "# Retro Rewind supplies its official app ID automatically. Set this\n"
-    "# to WiiCompiled's Discord application ID for basic base-game presence.\n"
-    "enabled = false\n";
+// Rich Presence is off until the player turns it on (Settings, or enabled = true here).
 inline constexpr std::string_view kDiscordBlock =
     "[discord]\n"
     "# Shows what you're playing in the Discord app on this computer. The base\n"
     "# game uses WiiCompiled's Discord application, Retro Rewind its own.\n"
-    "enabled = true\n";
+    "enabled = false\n";
 
-inline void UpgradeDiscordDefault(const std::filesystem::path& path) {
-    std::string text;
+// Replaces a file's contents in one step: the text goes to a temporary file beside it, flushed to
+// disk, which then takes the old one's place. A crash or a full disk mid-write leaves the previous
+// contents rather than a cut-off file. A symlinked file is replaced where the link points.
+inline bool WriteFileAtomically(const std::filesystem::path& path, std::string_view contents) {
+    std::error_code ec;
+    std::filesystem::path target = path;
+    if (std::filesystem::is_symlink(path, ec)) {
+        const std::filesystem::path resolved = std::filesystem::weakly_canonical(path, ec);
+        if (!ec) target = resolved;
+    }
+    if (target.has_parent_path()) std::filesystem::create_directories(target.parent_path(), ec);
+    static std::atomic<unsigned> sequence{0};
+#ifdef _WIN32
+    const unsigned long process = GetCurrentProcessId();
+#else
+    const long process = static_cast<long>(getpid());
+#endif
+    std::filesystem::path temporary = target;
+    temporary += ".tmp-" + std::to_string(process) + "-" + std::to_string(sequence++);
+    bool written = false;
+#ifdef _WIN32
     {
-        std::ifstream input(path, std::ios::binary);
-        text.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+        std::ofstream output(temporary, std::ios::trunc);
+        output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+        output.flush();
+        written = static_cast<bool>(output);
     }
-    const size_t at = text.find(kDiscordOffByDefaultBlock);
-    if (at == std::string::npos) {
-        return;
+#else
+    // The replacement keeps the old file's permissions.
+    struct stat existing {};
+    const mode_t mode = ::stat(target.c_str(), &existing) == 0 ? (existing.st_mode & 07777) : 0644;
+    const int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    if (fd >= 0) {
+        (void)::fchmod(fd, mode);  // open() applies the umask
+        written = true;
+        const char* data = contents.data();
+        size_t left = contents.size();
+        while (left > 0) {
+            const ssize_t count = ::write(fd, data, left);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                written = false;
+                break;
+            }
+            data += count;
+            left -= static_cast<size_t>(count);
+        }
+        written = ::fsync(fd) == 0 && written;
+        written = ::close(fd) == 0 && written;
     }
-    text.replace(at, kDiscordOffByDefaultBlock.size(), kDiscordBlock);
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    output << text;
+#endif
+    if (written) {
+        ec.clear();
+        std::filesystem::rename(temporary, target, ec);
+        written = !ec;
+    }
+    if (!written) {
+        std::filesystem::remove(temporary, ec);
+    }
+    return written;
 }
 
 inline void EnsureConfigFile() {
@@ -355,18 +397,10 @@ inline void EnsureConfigFile() {
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec || std::filesystem::exists(path, ec)) {
-        if (!ec) {
-            // Once a run: every settings reload comes through here.
-            static const bool upgraded = (UpgradeDiscordDefault(path), true);
-            (void)upgraded;
-        }
         return;
     }
 
-    std::ofstream output(path);
-    if (!output) {
-        return;
-    }
+    std::ostringstream output;
     output << "# WiiCompiled user configuration\n"
               "# Set paths.dvd_root to an extracted Mario Kart Wii DATA directory.\n\n"
               "[video]\n"
@@ -407,6 +441,7 @@ inline void EnsureConfigFile() {
               "# nand_root = \"D:\\\\WiiNand\"\n"
               "# retro_rewind_root = \"D:\\\\RetroRewind\\\\RetroRewind6\"\n"
               "# overlay_roots = [\"D:\\\\RetroRewind\"]\n";
+    WriteFileAtomically(path, output.str());
 }
 
 template <typename T>
@@ -682,19 +717,16 @@ inline bool WriteSetting(std::string_view section, std::string_view key, std::st
         }
     }
 
-    std::error_code ec;
-    if (path.has_parent_path()) {
-        std::filesystem::create_directories(path.parent_path(), ec);
+    std::string text;
+    for (const auto& outputLine : lines) {
+        text += outputLine;
+        text += '\n';
     }
-    std::ofstream output(path, std::ios::trunc);
-    if (!output) {
+    if (!WriteFileAtomically(path, text)) {
         std::cerr << "[runtime-config] Unable to write " << PathToUtf8(path) << std::endl;
         return false;
     }
-    for (const auto& outputLine : lines) {
-        output << outputLine << '\n';
-    }
-    return static_cast<bool>(output);
+    return true;
 }
 
 inline std::string FormatString(std::string_view value) {
@@ -1061,7 +1093,7 @@ inline std::string RetroRewindRoot(std::string fallback = "") {
     return Get().retroRewindRoot.value_or(std::move(fallback));
 }
 
-inline bool DiscordPresenceEnabled(bool fallback = true) {
+inline bool DiscordPresenceEnabled(bool fallback = false) {
     return Get().discordPresenceEnabled.value_or(fallback);
 }
 
