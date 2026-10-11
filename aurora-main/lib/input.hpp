@@ -20,6 +20,9 @@ struct GameController {
   bool m_gameCubeUseOrdinaryStop = false;
   Sint32 m_index = -1;
   Sint32 m_playerIndex = -1;
+  // An SDL virtual joystick (a phone): its player lasts this session only. Kept from when it was
+  // added, as SDL no longer says so once it's detached.
+  bool m_isVirtual = false;
   bool m_hasRumble = false;
   PADDeadZones m_deadZones{
       .emulateTriggers = true,

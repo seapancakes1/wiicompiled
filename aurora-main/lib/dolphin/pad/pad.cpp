@@ -416,7 +416,7 @@ void PADSetPortForIndex(const u32 idx, const u32 port) {
   }
   if (oldPort >= 0 && oldPort != static_cast<int32_t>(port)) {
     // A virtual pad (a phone) holds players for this session only: its old one goes back as it was saved.
-    if (SDL_IsJoystickVirtual(ctrl->m_index)) {
+    if (ctrl->m_isVirtual) {
       aurora::input::release_session_player(oldPort);
     } else {
       aurora::input::persist_controller_for_player(oldPort, nullptr);
@@ -444,7 +444,7 @@ int32_t PADGetIndexForPort(const u32 port) {
 
 void PADClearPort(const u32 port) {
   const auto* ctrl = aurora::input::get_controller_for_player(port);
-  if (ctrl != nullptr && SDL_IsJoystickVirtual(ctrl->m_index)) {
+  if (ctrl != nullptr && ctrl->m_isVirtual) {
     aurora::input::release_session_player(port);
   } else {
     aurora::input::persist_controller_for_player(port, nullptr);

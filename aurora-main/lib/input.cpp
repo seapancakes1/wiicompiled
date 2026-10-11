@@ -83,7 +83,12 @@ bool serial_matches(const std::string& saved, const std::string& current) {
 ControllerIdentity controller_identity(const GameController& controller) {
   ControllerIdentity identity;
   char guid[33] = {};
-  SDL_GUIDToString(SDL_GetGamepadGUIDForID(SDL_GetGamepadID(controller.m_controller)), guid, sizeof(guid));
+  SDL_GUID id = SDL_GetGamepadGUIDForID(SDL_GetGamepadID(controller.m_controller));
+  // Detached (SDL's "gamepad removed" comes after): the open handle still has it.
+  if (std::all_of(std::begin(id.data), std::end(id.data), [](Uint8 byte) { return byte == 0; })) {
+    id = SDL_GetJoystickGUID(SDL_GetGamepadJoystick(controller.m_controller));
+  }
+  SDL_GUIDToString(id, guid, sizeof(guid));
   identity.guid = guid;
   identity.serial = normalize_serial(SDL_GetGamepadSerial(controller.m_controller));
   return identity;
@@ -412,6 +417,7 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
     GameController controller;
     controller.m_controller = ctrl;
     controller.m_index = which;
+    controller.m_isVirtual = SDL_IsJoystickVirtual(which);
     controller.m_vid = SDL_GetGamepadVendor(ctrl);
     controller.m_pid = SDL_GetGamepadProduct(ctrl);
     if (controller.m_vid == 0x05ac /* USB_VENDOR_APPLE */ && controller.m_pid == 3) {
@@ -465,7 +471,7 @@ bool refresh_controller(SDL_JoystickID instance) noexcept {
 void remove_controller(Uint32 instance) noexcept {
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
     Log.info("Controller disconnected: instance {}", instance);
-    if (SDL_IsJoystickVirtual(instance)) {
+    if (it->second.m_isVirtual) {
       // A phone that has gone for good gives its player back to whoever had it saved.
       const auto identity = controller_identity(it->second);
       for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
@@ -552,7 +558,7 @@ void persist_controller_for_player(uint32_t player, const GameController* contro
   }
   g_portPreferences[player] = preference;
   // A virtual pad holds the player for this session; what's saved stays as it was.
-  if (controller != nullptr && SDL_IsJoystickVirtual(controller->m_index)) {
+  if (controller != nullptr && controller->m_isVirtual) {
     return;
   }
   g_savedPortPreferences[player] = preference;
