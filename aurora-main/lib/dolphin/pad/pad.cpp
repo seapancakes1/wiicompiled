@@ -135,11 +135,15 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsNSOGamecube{{
     {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, PAD_BUTTON_RIGHT},
 }};
 
+// A Switch Pro Controller and a pair of Joy-Cons in the grip go by their labels, as Nintendo's own
+// games do and as the Wii U Pro does below: A on the right accelerates and B at the bottom brakes. SDL
+// reports their buttons by position (an Xbox layout), so the right one is EAST. A single sideways
+// Joy-Con has no labels to follow and keeps the positional table.
 std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsProCon{{
-    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_A},
-    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_B},
-    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_X},
-    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_Y},
+    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_A},
+    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_B},
+    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_X},
+    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_Y},
     {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
     {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_TRIGGER_Z},
     {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_L},
@@ -181,10 +185,10 @@ std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsJoyConLeft{{
 }};
 
 std::array<PADButtonMapping, PAD_BUTTON_COUNT> g_defaultButtonsJoyPair{{
-    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_A},
-    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_B},
-    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_X},
-    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_Y},
+    {SDL_GAMEPAD_BUTTON_EAST, PAD_BUTTON_A},
+    {SDL_GAMEPAD_BUTTON_SOUTH, PAD_BUTTON_B},
+    {SDL_GAMEPAD_BUTTON_NORTH, PAD_BUTTON_X},
+    {SDL_GAMEPAD_BUTTON_WEST, PAD_BUTTON_Y},
     {SDL_GAMEPAD_BUTTON_START, PAD_BUTTON_START},
     {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_TRIGGER_Z},
     {PAD_NATIVE_BUTTON_INVALID, PAD_TRIGGER_L},
