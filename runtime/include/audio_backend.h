@@ -22,6 +22,9 @@ public:
     // Applied to the final host output, covering both AX and direct AI DMA.
     void SetMasterVolume(float volume);
     void SetMuted(bool muted);
+    // Silent while a screen holds the game (the Mac's HOME and the like), whatever the volume
+    // and mute settings say. Letting go drops what was queued meanwhile, so none of it plays late.
+    void SetHeld(bool held);
 
 private:
     AudioBackend() = default;
@@ -44,6 +47,7 @@ private:
     bool m_initialized = false;
     float m_masterVolume = 1.0f;
     bool m_muted = false;
+    bool m_held = false;
     bool m_reportedDroppedBlock = false;
     bool m_reportedAudibleBlock = false;
     uint64_t m_queueChecks = 0;

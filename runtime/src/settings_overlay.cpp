@@ -1399,6 +1399,16 @@ uint64_t PresentedFrameCount() noexcept { return g_presentedFrame; }
 
 #if defined(__APPLE__) && TARGET_OS_OSX
 namespace {
+// The game is silent while a KartPad screen holds it, including the single frames a settings change
+// lets through (otherwise each change plays a blip of the game). KartPad's own menu sounds play
+// separately and carry on.
+void HoldGameAudio(bool held) {
+    static bool current = false;
+    if (held == current) return;
+    current = held;
+    AudioBackend::Instance().SetHeld(held);
+}
+
 // A KartPad screen over the game holds it still. Unlike the background pause, Aurora keeps taking
 // its events (controllers connecting, the window changing) and the shell keeps reading the pads and
 // drawing its screen; the game draws nothing, so its last frame stays under the screen. A settings
@@ -1408,6 +1418,7 @@ bool WaitWhileOverlayOpen() {
         PAD_MOTOR_STOP, PAD_MOTOR_STOP, PAD_MOTOR_STOP, PAD_MOTOR_STOP};
     PADControlAllMotors(stopAll.data());
     ApplyInputBlockState();
+    HoldGameAudio(true);
     while (KartPadOverlayPauseWanted() && !g_nativeSettingsReload.load() && !Network_HLE_HasOpenSockets()) {
         SDL_WaitEventTimeout(nullptr, 16);
         UpdateAuroraAndProcessEvents();
@@ -1415,6 +1426,8 @@ bool WaitWhileOverlayOpen() {
         ApplyInputBlockState();
         UpdateCursorAutoHide();
     }
+    // Still silent for a frame let through to apply a setting; sound again once the screen closes.
+    HoldGameAudio(KartPadOverlayPauseWanted() && !Network_HLE_HasOpenSockets());
     return true;
 }
 } // namespace
@@ -1422,6 +1435,10 @@ bool WaitWhileOverlayOpen() {
 
 bool WaitWhileBackgroundPaused() noexcept {
 #if defined(__APPLE__) && TARGET_OS_OSX
+    // A screen that closed during a frame let through: the game's sound comes back with it.
+    if (!KartPadOverlayPauseWanted()) {
+        HoldGameAudio(false);
+    }
     // Loading carries on while you look elsewhere, and an online game would drop out of its room.
     if (StartupScreenVisible() || Network_HLE_HasOpenSockets()) {
         return false;

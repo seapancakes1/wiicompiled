@@ -15,7 +15,7 @@ AudioBackend& AudioBackend::Instance() {
 }
 
 float AudioBackend::EffectiveGainLocked() const {
-    return m_muted ? 0.0f : m_masterVolume;
+    return m_muted || m_held ? 0.0f : m_masterVolume;
 }
 
 void AudioBackend::ApplyGainLocked() {
@@ -33,6 +33,19 @@ void AudioBackend::SetMasterVolume(float volume) {
 void AudioBackend::SetMuted(bool muted) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_muted = muted;
+    ApplyGainLocked();
+}
+
+void AudioBackend::SetHeld(bool held) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (held == m_held) {
+        return;
+    }
+    m_held = held;
+    RT_LOG(RT_TAG_AUDIO) << (held ? "game sound held while a screen is open" : "game sound back") << std::endl;
+    if (!held && m_stream && !SDL_ClearAudioStream(m_stream)) {
+        RT_LOG(RT_TAG_AUDIO) << "SDL_ClearAudioStream failed: " << SDL_GetError() << std::endl;
+    }
     ApplyGainLocked();
 }
 
