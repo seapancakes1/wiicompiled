@@ -311,7 +311,7 @@ if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND MKW_KARTPAD_REPO_ROOT)
         set_property(SOURCE "${MKW_KARTPAD_MACOS_SHELL}" APPEND PROPERTY COMPILE_DEFINITIONS KARTPAD_QA_HOOKS=1)
     endif()
     target_link_libraries(WiiCompiled PRIVATE
-        "-framework AppKit" "-framework UniformTypeIdentifiers"
+        "-framework AppKit" "-framework CoreGraphics" "-framework MetalKit" "-framework UniformTypeIdentifiers"
         "-framework IOBluetooth" "-framework IOKit"
         "-framework Network" "-framework CoreImage"
         kartpad_phone_link)
@@ -335,7 +335,7 @@ if(MKW_HAVE_RETRO_REWIND)
             "${MKW_KARTPAD_MACOS_DIR}" "${MKW_KARTPAD_REPO_ROOT}/apple/shared"
             "${MKW_KARTPAD_REPO_ROOT}/runtime/include")
         target_link_libraries(RetroRewind PRIVATE
-            "-framework AppKit" "-framework UniformTypeIdentifiers"
+            "-framework AppKit" "-framework CoreGraphics" "-framework MetalKit" "-framework UniformTypeIdentifiers"
             "-framework IOBluetooth" "-framework IOKit"
             "-framework Network" "-framework CoreImage"
             kartpad_phone_link)
@@ -362,7 +362,7 @@ if(MKW_HAVE_RETRO_REWIND)
         target_link_libraries(RetroRewind PRIVATE
             ${MKW_KARTPAD_DISCIO_ARCHIVES}
             "-framework UIKit" "-framework CoreGraphics" "-framework QuartzCore"
-            "-framework Metal" "-framework GameController"
+            "-framework Metal" "-framework MetalKit" "-framework GameController"
             "-framework CoreMotion" "-framework UniformTypeIdentifiers"
             "-framework SystemConfiguration" "-framework CoreFoundation"
             "-framework CoreServices" "-framework Foundation" "-framework SafariServices"
@@ -428,7 +428,7 @@ if(MKW_HAVE_RETRO_REWIND)
             "${CMAKE_CURRENT_LIST_DIR}/../third_party/kartpad-profile")
         target_compile_definitions(KartPadDual PRIVATE KARTPAD_RUNTIME_PRODUCT_DUAL=1)
         target_link_libraries(KartPadDual PRIVATE
-            "-framework AppKit" "-framework UniformTypeIdentifiers"
+            "-framework AppKit" "-framework CoreGraphics" "-framework MetalKit" "-framework UniformTypeIdentifiers"
             "-framework IOBluetooth" "-framework IOKit"
             "-framework Network" "-framework CoreImage"
             kartpad_phone_link)
@@ -453,7 +453,7 @@ if(MKW_HAVE_RETRO_REWIND)
         target_link_libraries(KartPadDual PRIVATE
             ${MKW_KARTPAD_DISCIO_ARCHIVES}
             "-framework UIKit" "-framework CoreGraphics" "-framework QuartzCore"
-            "-framework Metal" "-framework GameController"
+            "-framework Metal" "-framework MetalKit" "-framework GameController"
             "-framework CoreMotion" "-framework UniformTypeIdentifiers"
             "-framework SystemConfiguration" "-framework CoreFoundation"
             "-framework CoreServices" "-framework Foundation" "-framework SafariServices"
