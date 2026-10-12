@@ -411,7 +411,7 @@ inline void EnsureConfigFile() {
               "graphics_api = \"auto\"\n"
               "skip_unready_pipelines = true\n"
               "disable_copy_filter = true\n"
-              "show_fps = true\n"
+              "show_fps = false\n"
               "# Dolphin-style custom textures. When enabled, the renderer indexes\n"
               "# texture_replacements/ next to this file at startup and substitutes\n"
               "# any tex1_<W>x<H>_<hash>[_<tlut hash>]_<format>.dds or .png it finds\n"
@@ -1023,7 +1023,7 @@ inline bool DisableCopyFilter(bool fallback = true) {
     return Get().disableCopyFilter.value_or(fallback);
 }
 
-inline bool ShowFps(bool fallback = true) {
+inline bool ShowFps(bool fallback = false) {
     return Get().showFps.value_or(fallback);
 }
 

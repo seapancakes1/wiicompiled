@@ -129,7 +129,7 @@ int g_displayMode = [] {
 }();
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
-bool g_showFps = RuntimeConfigFile::ShowFps(true);
+bool g_showFps = RuntimeConfigFile::ShowFps(false);
 uint32_t g_disabledPostProcessingPaths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
 std::array<int32_t, PAD_MAX_CONTROLLERS> g_configuredControllerIndices = [] {
     std::array<int32_t, PAD_MAX_CONTROLLERS> indices{};
@@ -1033,17 +1033,9 @@ void DrawFpsOverlay() {
         } else {
             // Present timing includes the additional frames produced by
             // interpolation, so this remains the actual displayed FPS.
+            // Just the rate on screen; the frame-time percentiles go to the log
+            // (the present telemetry line above) for diagnostics.
             ImGui::Text("FPS: %.1f", presentTiming.framesPerSecond);
-#if defined(__ANDROID__)
-            ImGui::Text("Frame ms: p50 %.1f  p95 %.1f",
-                        presentTiming.p50FrameTimeMs, presentTiming.p95FrameTimeMs);
-            ImGui::Text("p99 %.1f  worst %.1f",
-                        presentTiming.p99FrameTimeMs, presentTiming.worstFrameTimeMs);
-#else
-            ImGui::Text("Frame ms: p50 %.1f  p95 %.1f  p99 %.1f  worst %.1f",
-                        presentTiming.p50FrameTimeMs, presentTiming.p95FrameTimeMs,
-                        presentTiming.p99FrameTimeMs, presentTiming.worstFrameTimeMs);
-#endif
             // Replay-unsafe frames hold the presented cadence with duplicated
             // slots, so the counter alone reads 180 while the motion on screen
             // is 60 Hz. Surface the divergence instead of hiding it.
@@ -1184,7 +1176,7 @@ void ApplyPictureSettings(const RuntimeUserConfig& c) {
         if (g_displayMode != display)
             RuntimeConfigFile::SetDisplayMode(std::string(kDisplayModeConfigNames[g_displayMode]));
     }
-    g_showFps = c.showFps.value_or(true);
+    g_showFps = c.showFps.value_or(false);
     g_disableCopyFilter = c.disableCopyFilter.value_or(true);
     g_skipUnreadyPipelines = c.skipUnreadyPipelines.value_or(true);
     aurora_set_disable_copy_filter(g_disableCopyFilter);
@@ -1235,7 +1227,7 @@ bool PictureSettingsChanged(const RuntimeUserConfig& c) {
     const int display = mode == "borderless" ? 1 : mode == "exclusive" ? 2 : 0;
     return c.resolutionMultiplier.value_or(1.0f) != g_resolutionScale ||
            (fps == 120 ? 1 : fps == 180 ? 2 : 0) != g_frameInterpolationMode || display != g_displayMode ||
-           c.showFps.value_or(true) != g_showFps || c.disableCopyFilter.value_or(true) != g_disableCopyFilter ||
+           c.showFps.value_or(false) != g_showFps || c.disableCopyFilter.value_or(true) != g_disableCopyFilter ||
            c.skipUnreadyPipelines.value_or(true) != g_skipUnreadyPipelines ||
            c.disabledPostProcessingPaths.value_or(0) != g_disabledPostProcessingPaths;
 }

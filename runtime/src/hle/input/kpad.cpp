@@ -74,6 +74,10 @@ std::array<std::atomic<bool>, 4> g_keyboardConnected{};
 // shell gives the keyboard to another player (its GameCube port), channel 0 stays connected, so the
 // game doesn't ask for a Wii Remote, but reads as idle.
 std::atomic<bool> g_keyboardDrivesChannel0{true};
+// Each key's buttons on the keyboard's Classic Controller (channel 0): the defaults below
+// (DefaultKeyboardClassicButtons) until the Mac shell's Buttons screen changes them
+// (KartPadSetKeyboardClassicButtons). Read on every poll, so relaxed atomics.
+std::array<std::atomic<uint32_t>, SDL_SCANCODE_COUNT> g_keyboardClassicKeys{};
 // Set as the game's input comes back after a KartPad screen (KPAD_IgnoreHeldKeys): the keys still
 // held then are kept from the game until they're let go (GameKeyboardState).
 std::atomic<bool> g_ignoreHeldKeys{false};
@@ -478,6 +482,13 @@ uint32_t ClassicButtonForScancode(uint32_t chan, SDL_Scancode code)
         if (chan == 2 && code == SDL_SCANCODE_M) buttons |= kClassicButtonZr;
         return buttons;
     }
+    const auto index = static_cast<size_t>(code);
+    return index < g_keyboardClassicKeys.size() ? g_keyboardClassicKeys[index].load(std::memory_order_relaxed) : 0;
+}
+
+// The keyboard's Classic Controller (channel 0) as the game starts it.
+uint32_t DefaultKeyboardClassicButtons(SDL_Scancode code)
+{
     switch (code) {
     case SDL_SCANCODE_U: return kClassicButtonA;
     case SDL_SCANCODE_M: return kClassicButtonB;
@@ -499,6 +510,15 @@ uint32_t ClassicButtonForScancode(uint32_t chan, SDL_Scancode code)
     default: return 0;
     }
 }
+
+// Filled at load, before the game or the shell can read or change a key.
+[[maybe_unused]] const bool g_keyboardClassicKeysFilled = [] {
+    for (size_t code = 0; code < g_keyboardClassicKeys.size(); ++code) {
+        g_keyboardClassicKeys[code].store(DefaultKeyboardClassicButtons(static_cast<SDL_Scancode>(code)),
+                                          std::memory_order_relaxed);
+    }
+    return true;
+}();
 
 bool SDLCALL WatchKeyboardEvent(void*, SDL_Event* event)
 {
@@ -1016,6 +1036,26 @@ extern "C" void KPAD_IgnoreHeldKeys()
 extern "C" void KartPadSetKeyboardDrivesWiiChannel0(bool drives)
 {
     g_keyboardDrivesChannel0.store(drives, std::memory_order_release);
+}
+
+// The Mac shell's Buttons screen for the keyboard as Player 1: which Classic Controller buttons a
+// key presses (kpad.cpp's kClassicButton bits; 0 for none), and as the game starts them.
+extern "C" uint32_t KartPadKeyboardClassicButtons(int scancode)
+{
+    if (scancode < 0 || scancode >= SDL_SCANCODE_COUNT) return 0;
+    return g_keyboardClassicKeys[static_cast<size_t>(scancode)].load(std::memory_order_relaxed);
+}
+
+extern "C" uint32_t KartPadDefaultKeyboardClassicButtons(int scancode)
+{
+    if (scancode < 0 || scancode >= SDL_SCANCODE_COUNT) return 0;
+    return DefaultKeyboardClassicButtons(static_cast<SDL_Scancode>(scancode));
+}
+
+extern "C" void KartPadSetKeyboardClassicButtons(int scancode, uint32_t buttons)
+{
+    if (scancode < 0 || scancode >= SDL_SCANCODE_COUNT) return;
+    g_keyboardClassicKeys[static_cast<size_t>(scancode)].store(buttons, std::memory_order_relaxed);
 }
 
 // KPADRead: fills KPADStatus[0] for `chan` from the Bluetooth remote, returns the entry count.
