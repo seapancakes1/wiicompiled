@@ -30,6 +30,7 @@ extern "C" void KartPadOpenSettingsFromShortcut();
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <iostream>
 #include <string>
@@ -87,7 +88,9 @@ namespace settings_overlay {
 namespace {
 using Clock = std::chrono::steady_clock;
 uint32_t g_cursorAutoHideSeconds = RuntimeConfigFile::CursorAutoHideSeconds(3);
+bool g_cursorHideOnController = RuntimeConfigFile::CursorHideOnController(false);
 Clock::time_point g_lastMouseActivity{Clock::now()};
+bool g_controllerUsedSinceMouse = false;
 bool g_cursorHidden = false;
 bool g_topBarVisible = false;
 bool g_exitPromptOpen = false;
@@ -1188,6 +1191,7 @@ void ApplyPictureSettings(const RuntimeUserConfig& c) {
 // Sound, vibration, Discord and the pointer, which need no frame.
 void ApplyOtherSettings(const RuntimeUserConfig& c) {
     g_cursorAutoHideSeconds = c.cursorAutoHideSeconds.value_or(3);
+    g_cursorHideOnController = c.cursorHideOnController.value_or(false);
     DiscordPresence::SetEnabled(RuntimeConfigFile::DiscordPresenceEnabled());
     const auto percent = [](float v) { return static_cast<int>(std::lround(std::clamp(v, 0.0f, 1.0f) * 100)); };
     g_audioVolumePercent = percent(c.audioVolume.value_or(1));
@@ -1300,7 +1304,27 @@ bool IsMouseActivity(const SDL_Event& event) {
     }
 }
 
-// Hides the pointer over the game window after a few idle seconds, but never
+// A press, a stick or trigger pushed well past its rest, or a key: a player is playing.
+bool IsControllerActivity(const SDL_Event& event) {
+    switch (event.type) {
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    case SDL_EVENT_JOYSTICK_BUTTON_DOWN:
+    case SDL_EVENT_JOYSTICK_HAT_MOTION:
+        return true;
+    case SDL_EVENT_KEY_DOWN:
+        return !event.key.repeat;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+        const bool trigger = event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
+                             event.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
+        return std::abs(static_cast<int>(event.gaxis.value)) > (trigger ? 10000 : 16000);
+    }
+    default:
+        return false;
+    }
+}
+
+// Hides the pointer over the game window after a few idle seconds (or, if chosen, once a
+// controller is used, until the mouse moves again), but never
 // while an in-game panel that needs the mouse is open. Runs on the thread that
 // pumps SDL events, after the frame worker is idle, so the SDL and ImGui calls
 // are safe here.
@@ -1311,9 +1335,10 @@ void UpdateCursorAutoHide() {
                                || KartPadControllersVisible()
 #endif
                                ;
-    const bool shouldHide = g_cursorAutoHideSeconds > 0 && !pointerNeeded &&
-                            Clock::now() - g_lastMouseActivity >=
-                                std::chrono::seconds(g_cursorAutoHideSeconds);
+    const bool idle = g_cursorAutoHideSeconds > 0 &&
+                      Clock::now() - g_lastMouseActivity >= std::chrono::seconds(g_cursorAutoHideSeconds);
+    const bool playing = g_cursorHideOnController && g_controllerUsedSinceMouse;
+    const bool shouldHide = !pointerNeeded && (idle || playing);
     if (shouldHide == g_cursorHidden) {
         return;
     }
@@ -1369,6 +1394,9 @@ void HandleEvents(const AuroraEvent* events) noexcept {
         }
         if (IsMouseActivity(ev->sdl)) {
             g_lastMouseActivity = Clock::now();
+            g_controllerUsedSinceMouse = false;
+        } else if (IsControllerActivity(ev->sdl)) {
+            g_controllerUsedSinceMouse = true;
         }
         if (kartpad::IsMacSettingsShortcut(ev->sdl)) {
             KartPadOpenSettingsFromShortcut();

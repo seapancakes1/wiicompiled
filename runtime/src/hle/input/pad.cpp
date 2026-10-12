@@ -23,6 +23,17 @@ namespace {
 
 std::atomic<bool> g_rumbleEnabled{true};
 std::atomic<float> g_rumbleStrength{0.5f};
+// A controller's own vibration strength (the Mac app sets it for the player it's on), 0 for off,
+// or below 0 to follow Settings.
+std::array<std::atomic<float>, PAD_CHANMAX> g_portRumbleStrength{-1.0f, -1.0f, -1.0f, -1.0f};
+
+float RumbleStrength(uint32_t chan) {
+    const float own = chan < PAD_CHANMAX ? g_portRumbleStrength[chan].load(std::memory_order_relaxed) : -1.0f;
+    if (own >= 0.0f) {
+        return own;
+    }
+    return g_rumbleEnabled.load(std::memory_order_relaxed) ? g_rumbleStrength.load(std::memory_order_relaxed) : 0.0f;
+}
 
 // The game turns each GameCube motor on and off. A pad with variable rumble gets the strength from
 // Settings, for a short while that each frame renews while the motor is on, so a game that stops
@@ -43,8 +54,7 @@ SDL_Gamepad* VariableRumblePad(uint32_t chan) {
 }
 
 void SendRumble(SDL_Gamepad* pad, uint32_t chan, bool on) {
-    const auto level = static_cast<uint16_t>(
-        std::lround(g_rumbleStrength.load(std::memory_order_relaxed) * 65535.0f));
+    const auto level = static_cast<uint16_t>(std::lround(RumbleStrength(chan) * 65535.0f));
     SDL_RumbleGamepad(pad, on ? level : 0, on ? level : 0, on ? kRumbleMs : 0);
     g_motorSent[chan] = RumbleClock::now();
 }
@@ -56,7 +66,7 @@ void RenewRumble() {
             continue;
         }
         if (SDL_Gamepad* pad = VariableRumblePad(chan)) {
-            SendRumble(pad, chan, g_rumbleEnabled.load(std::memory_order_relaxed));
+            SendRumble(pad, chan, RumbleStrength(chan) > 0.0f);
         }
     }
 }
@@ -184,6 +194,14 @@ extern "C" void PAD_HLE_SetRumbleStrength(float strength)
     g_rumbleStrength.store(std::clamp(strength, 0.0f, 1.0f), std::memory_order_relaxed);
 }
 
+extern "C" void PAD_HLE_SetPortRumbleStrength(uint32_t chan, float strength)
+{
+    if (chan < PAD_CHANMAX) {
+        g_portRumbleStrength[chan].store(strength < 0.0f ? -1.0f : std::min(strength, 1.0f),
+                                         std::memory_order_relaxed);
+    }
+}
+
 extern "C" uint32_t PAD__Init_HLE()
 {
     Wup028Adapter::Initialize();
@@ -242,7 +260,7 @@ PPC_NATIVE_OVERRIDE(801AF1E4, PAD__Recalibrate_HLE, uint32_t, (uint32_t mask), (
 
 extern "C" void PAD__ControlMotor_HLE(int32_t chan, uint32_t command)
 {
-    if (command == PAD_MOTOR_RUMBLE && !g_rumbleEnabled.load(std::memory_order_relaxed)) {
+    if (command == PAD_MOTOR_RUMBLE && RumbleStrength(static_cast<uint32_t>(chan)) <= 0.0f) {
         command = PAD_MOTOR_STOP;
     }
     const bool on = command == PAD_MOTOR_RUMBLE;

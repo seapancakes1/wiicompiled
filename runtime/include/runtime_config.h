@@ -58,6 +58,7 @@ struct RuntimeUserConfig {
     std::optional<bool> textureDumps;
     std::optional<bool> showFps;
     std::optional<uint32_t> cursorAutoHideSeconds;
+    std::optional<bool> cursorHideOnController;
     std::optional<uint32_t> disabledPostProcessingPaths;
     std::optional<float> audioVolume;
     std::optional<float> audioMusicVolume;
@@ -569,6 +570,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
     config.cursorAutoHideSeconds = FindConfigUint(document, "video", "cursor_auto_hide_seconds");
+    config.cursorHideOnController = FindConfigValue<bool>(document, "video", "cursor_hide_on_controller");
     config.textureReplacements = FindConfigValue<bool>(document, "video", "texture_replacements");
     config.textureDumps = FindConfigValue<bool>(document, "video", "texture_dumps");
     if (auto value = FindConfigUint(document, "video", "disabled_post_processing_paths");
@@ -1032,6 +1034,11 @@ inline uint32_t CursorAutoHideSeconds(uint32_t fallback = 3) {
     return Get().cursorAutoHideSeconds.value_or(fallback);
 }
 
+// Hides the pointer as soon as a controller (or the keyboard) is used, until the mouse moves.
+inline bool CursorHideOnController(bool fallback = false) {
+    return Get().cursorHideOnController.value_or(fallback);
+}
+
 inline bool TextureReplacements(bool fallback = false) {
     return Get().textureReplacements.value_or(fallback);
 }
@@ -1144,6 +1151,9 @@ inline void LogLoadedConfig() {
             }
             if (config.cursorAutoHideSeconds) {
                 std::cout << " cursor_auto_hide_seconds=" << *config.cursorAutoHideSeconds;
+            }
+            if (config.cursorHideOnController) {
+                std::cout << " cursor_hide_on_controller=" << (*config.cursorHideOnController ? "true" : "false");
             }
             if (config.textureReplacements) {
                 std::cout << " texture_replacements=" << (*config.textureReplacements ? "true" : "false");
