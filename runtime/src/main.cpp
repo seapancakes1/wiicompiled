@@ -167,6 +167,14 @@ std::string g_lastEntryLabel;
 // The host trace from the most recent fatal signal, repeated in the crash log file.
 std::string g_signalHostTrace;
 std::atomic_bool g_auroraInitialized{false};
+
+// aurora_shutdown, once: the ways out of the game (returning from main, RuntimeTerminate, an exit()
+// under the running game) can meet.
+void ShutdownAuroraOnce() {
+    if (g_auroraInitialized.exchange(false, std::memory_order_acq_rel)) {
+        aurora_shutdown();
+    }
+}
 std::atomic_flag g_abortSignalHandled = ATOMIC_FLAG_INIT;
 std::atomic_bool g_fatalErrorReported{false};
 std::atomic_bool g_fatalPopupShown{false};
@@ -187,6 +195,21 @@ struct ProcessTranscriptState {
     int stderrPipeWriteFd = -1;
     std::thread stdoutThread;
     std::thread stderrThread;
+    // Set by each pump as it finishes, so shutdown can tell a pump that is draining from one that
+    // never will (another process holding the pipe).
+    std::atomic_bool stdoutPumpDone{false};
+    std::atomic_bool stderrPumpDone{false};
+
+    // A pump still running when this static is destroyed (an exit() that ShutdownProcessTranscript
+    // didn't see through) would otherwise std::terminate here.
+    ~ProcessTranscriptState() {
+        if (stdoutThread.joinable()) {
+            stdoutThread.detach();
+        }
+        if (stderrThread.joinable()) {
+            stderrThread.detach();
+        }
+    }
 };
 
 std::filesystem::path GetDefaultRuntimeLogDirectory() {
@@ -416,6 +439,8 @@ std::string ReadInstalledSetupVersion() {
     return text.substr(open + 1, close - open - 1);
 }
 
+void ShutdownProcessTranscript();
+
 void InitializeProcessTranscript(int argc, char** argv) {
     auto& state = GetProcessTranscriptState();
     if (state.initialized.exchange(true, std::memory_order_acq_rel)) {
@@ -505,10 +530,17 @@ void InitializeProcessTranscript(int argc, char** argv) {
 
     state.stdoutThread = std::thread([&state]() {
         PumpTranscriptPipe(state, state.stdoutPipeReadFd, state.savedStdoutFd);
+        state.stdoutPumpDone.store(true, std::memory_order_release);
     });
     state.stderrThread = std::thread([&state]() {
         PumpTranscriptPipe(state, state.stderrPipeReadFd, state.savedStderrFd);
+        state.stderrPumpDone.store(true, std::memory_order_release);
     });
+
+    // exit() from outside the runtime's own shutdown (AppKit's terminate: when macOS asks the app to
+    // quit) runs atexit handlers and then static destructors. Registered after the state exists, this
+    // runs before its destructor, so the pumps are drained and joined first.
+    std::atexit([] { ShutdownProcessTranscript(); });
 }
 
 void ShutdownProcessTranscript() {
@@ -538,11 +570,25 @@ void ShutdownProcessTranscript() {
         state.stderrPipeWriteFd = -1;
     }
 
-    if (state.stdoutThread.joinable()) {
-        state.stdoutThread.join();
+    // Closing the write ends lets the pumps drain and stop. A pump that hasn't within a second has a
+    // pipe some other process still holds open (a child that inherited it); it is left behind rather
+    // than holding up the exit.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while ((!state.stdoutPumpDone.load(std::memory_order_acquire) ||
+            !state.stderrPumpDone.load(std::memory_order_acquire)) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    if (state.stderrThread.joinable()) {
-        state.stderrThread.join();
+    for (auto [thread, done] : {std::pair{&state.stdoutThread, &state.stdoutPumpDone},
+                                std::pair{&state.stderrThread, &state.stderrPumpDone}}) {
+        if (!thread->joinable()) {
+            continue;
+        }
+        if (done->load(std::memory_order_acquire)) {
+            thread->join();
+        } else {
+            thread->detach();
+        }
     }
 
     if (state.stdoutPipeReadFd >= 0) {
@@ -918,9 +964,7 @@ void WriteCrashArtifacts(std::string_view reason, std::string_view extraDetails,
 
     // Stop workers before their guest-memory mappings or static state disappear.
     try { AxDspHle::ShutdownMixWorker(); } catch (...) {}
-    if (g_auroraInitialized.exchange(false, std::memory_order_acq_rel)) {
-        try { aurora_shutdown(); } catch (...) {}
-    }
+    try { ShutdownAuroraOnce(); } catch (...) {}
     try { ShutdownProcessTranscript(); } catch (...) {}
     std::fflush(nullptr);
     std::_Exit(code);
@@ -1626,6 +1670,21 @@ int RuntimeMain(int argc, char** argv) {
                   << (g_dynamicAspectRatioEnabled ? "surface (dynamic EGG canvas)" : "4:3")
                   << std::endl;
         g_auroraInitialized.store(true, std::memory_order_release);
+        // exit() while the game runs (AppKit's own terminate:, when macOS asks KartPad to quit and the
+        // shell can't take it the usual way) would destroy Aurora's and the mixer's threads still
+        // running, which std::terminates. Registered last, this runs first and stops them, as
+        // RuntimeTerminate does.
+        static std::once_flag exitHook;
+        std::call_once(exitHook, [] {
+            std::atexit([] {
+                if (!g_auroraInitialized.load(std::memory_order_acquire)) {
+                    return;
+                }
+                try { AxDspHle::ShutdownMixWorker(); } catch (...) {}
+                try { WindowPlacementPersistence::Flush(true); } catch (...) {}
+                try { ShutdownAuroraOnce(); } catch (...) {}
+            });
+        });
 
         auto entry = ResolveEntry();
         InitializePersistentCpuContext();
@@ -1653,7 +1712,7 @@ int RuntimeMain(int argc, char** argv) {
         // Shutdown fiber system
         Fiber::GuestFiberManager::Shutdown();
         WindowPlacementPersistence::Flush(true);
-        aurora_shutdown();
+        ShutdownAuroraOnce();
         DiscordPresence::Shutdown();
         SetRuntimeExitCodeImpl(0);
         ShutdownProcessTranscript();
@@ -1671,7 +1730,7 @@ int RuntimeMain(int argc, char** argv) {
         SetRuntimeExitCodeImpl(1);
         Fiber::GuestFiberManager::Shutdown();
         WindowPlacementPersistence::Flush(true);
-        aurora_shutdown();
+        ShutdownAuroraOnce();
         DiscordPresence::Shutdown();
         ShutdownProcessTranscript();
         return 1;
@@ -1683,7 +1742,7 @@ int RuntimeMain(int argc, char** argv) {
         SetRuntimeExitCodeImpl(1);
         Fiber::GuestFiberManager::Shutdown();
         WindowPlacementPersistence::Flush(true);
-        aurora_shutdown();
+        ShutdownAuroraOnce();
         DiscordPresence::Shutdown();
         ShutdownProcessTranscript();
         return 1;
