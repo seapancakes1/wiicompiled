@@ -8,6 +8,8 @@ struct CpuContext;
 
 extern "C" int32_t Network_HLE_OpenDevice(const char* path, uint32_t mode);
 extern "C" bool Network_HLE_IsFd(uint32_t fd);
+// The game has a host socket open (online, or connecting). Read on the guest thread.
+extern "C" bool Network_HLE_HasOpenSockets();
 extern "C" int32_t Network_HLE_Close(uint32_t fd);
 extern "C" int32_t Network_HLE_Ioctl(uint32_t fd, uint32_t cmd, uint32_t inBuf, uint32_t inLen,
                                       uint32_t outBuf, uint32_t outLen);

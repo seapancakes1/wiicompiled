@@ -152,10 +152,14 @@ extern "C" int32_t WPADProbe_HLE(uint32_t chan, uint32_t typePtr)
 }
 PPC_NATIVE_OVERRIDE(801C0990, WPADProbe_HLE, int32_t, (uint32_t chan, uint32_t typePtr), (chan, typePtr));
 
+// The iPhone and iPad shell drives the player's controller motors (apple/ios/KartPadScreens.mm).
+extern "C" __attribute__((weak)) void KartPadMobileSetRumble(uint32_t chan, bool on);
+
 extern "C" void WPADControlMotor_HLE(uint32_t chan, uint32_t command)
 {
-    (void)chan;
-    (void)command;
+    if (KartPadMobileSetRumble != nullptr) {
+        KartPadMobileSetRumble(chan, command != 0);
+    }
 }
 PPC_NATIVE_OVERRIDE(801C0EC4, WPADControlMotor_HLE, void, (uint32_t chan, uint32_t command), (chan, command));
 

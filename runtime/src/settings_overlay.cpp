@@ -1705,3 +1705,7 @@ void NotifyStrapInputAccepted() noexcept {
 
 void AdvancePresentedFrame() noexcept { ++g_presentedFrame; }
 } // namespace settings_overlay
+
+// KartPad's screens on iPhone and iPad (apple/ios/KartPadScreens.mm) wait while the black
+// "KartPad" screen is up as the game starts.
+extern "C" bool KartPadGameStarting() { return settings_overlay::StartupScreenVisible(); }

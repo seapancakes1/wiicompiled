@@ -346,6 +346,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND MKW_KARTPAD_REPO_ROOT)
     endforeach()
     set(MKW_KARTPAD_MOBILE_SOURCES
         "${MKW_KARTPAD_IOS_DIR}/KartPadRuntimeOverlayHost.mm"
+        "${MKW_KARTPAD_IOS_DIR}/KartPadScreens.mm"
         "${MKW_KARTPAD_IOS_DIR}/KartPadSystemDiagnostics.mm"
         "${MKW_KARTPAD_SHARED_DIR}/KartPadMiiManager.mm"
         "${MKW_KARTPAD_IOS_DIR}/KartPadDiscExtractor.mm"
