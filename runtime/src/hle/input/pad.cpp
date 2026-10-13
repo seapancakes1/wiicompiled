@@ -1,4 +1,5 @@
 #include "hle_stubs.h"
+#include "controller_shake.h"
 #include "memory.h"
 #include "hle/controller_status_contract.h"
 #include "input_bindings.h"
@@ -232,6 +233,7 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
 
     FillTriggersHeldByButtons(statuses);
     InputBindings::Apply(statuses);
+    ControllerShake::Apply(statuses);
 
     try {
         for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {
