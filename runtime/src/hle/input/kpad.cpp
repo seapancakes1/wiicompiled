@@ -724,6 +724,7 @@ kartpad::android::ClassicInputState ReadAndroidClassicInput(uint32_t chan)
     raw.left_y = snapshot.leftY;
     // Rotate a lone sideways Joy-Con first so remapping applies to its grip.
     raw = RotateSidewaysJoyCon(raw, snapshot.vendor, snapshot.product);
+    raw = ApplyNintendoLayout(raw, snapshot.vendor, snapshot.product);
     raw.buttons = ApplyControllerButtonMapping(raw.buttons, ReadControllerButtonMapping());
     raw.left_trigger = 0; // Trigger presses are part of the remapping above.
     raw.right_trigger = 0;

@@ -73,4 +73,12 @@ bool assign_standard_gamepad(uint32_t instance, uint32_t player) noexcept;
 // currently assigned to it.
 bool clear_standard_gamepad_player(uint32_t player) noexcept;
 
+// KartPad's own screens own the pads while one is open: reads stay connected
+// but neutral, and rumble stops. Handing them back quiets whatever is held at
+// that moment until it is let go (a trigger counts as held from
+// triggerThreshold), so the press that closed a screen doesn't also reach the
+// game, and the game's rumble resumes. Independent of
+// set_standard_gamepads_active, which follows the Android lifecycle.
+void set_standard_gamepads_host_owned(bool owned, int16_t triggerThreshold) noexcept;
+
 }  // namespace aurora::input

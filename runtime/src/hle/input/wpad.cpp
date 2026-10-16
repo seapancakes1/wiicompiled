@@ -8,6 +8,7 @@
 
 #if defined(__ANDROID__)
 #include <aurora/input.hpp>
+#include "kartpad/android/controller_mapping.hpp"
 #include "kartpad/android/gamepad_contract.h"
 #endif
 
@@ -162,7 +163,8 @@ extern "C" void WPADControlMotor_HLE(uint32_t chan, uint32_t command)
 #if defined(__ANDROID__)
     aurora::input::set_standard_gamepad_rumble(
         chan, chan == 0,
-        kartpad::android::WpadMotorCommandEnablesRumble(command));
+        kartpad::android::WpadMotorCommandEnablesRumble(command) &&
+            kartpad::android::ControllerVibrationEnabled());
 #else
     (void)chan;
     (void)command;

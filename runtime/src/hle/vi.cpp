@@ -553,6 +553,15 @@ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
 
 } // namespace
 
+// KartPad's screens held the game (runtime/src/android/host_screens.cpp in the app): pace retraces
+// afresh from now instead of replaying the hold as a backlog, which would fast-forward the game.
+void VI_HLE_ResyncAfterHostHold() {
+    std::lock_guard<std::mutex> lock(g_viMutex);
+    if (g_vi.initialized) {
+        g_vi.lastRetrace = Clock::now();
+    }
+}
+
 // Force one retrace boundary to pass, whether or not its wall-clock deadline
 // has arrived, so the guest's retrace callbacks (AsyncDisplay's counters and
 // friends) run. VI_HLE_PollRetrace below is the time-driven counterpart.

@@ -29,6 +29,8 @@ absl::flat_hash_map<Uint32, GameController> g_GameControllers;
 
 namespace {
 std::atomic_bool g_standardGamepadsActive{true};
+std::atomic_bool g_standardGamepadsHostOwned{false};
+int16_t g_quietTriggerThreshold = 0;
 std::mutex g_standardGamepadBridgeMutex;
 
 constexpr uint32_t kPortPreferencesMagic = SBIG('CPRT');
@@ -485,14 +487,24 @@ bool read_standard_gamepad_state(uint32_t player, bool allowSingleUnassigned,
   }
 
   state->connected = true;
-  state->buttons = controller->m_standardButtons | controller->m_standardButtonPresses;
+  state->vendor = SDL_GetGamepadVendor(controller->m_controller);
+  state->product = SDL_GetGamepadProduct(controller->m_controller);
+  if (g_standardGamepadsHostOwned.load(std::memory_order_acquire)) {
+    controller->m_standardButtonPresses = 0;
+    return true;
+  }
+  controller->m_quietButtons &= controller->m_standardButtons;
+  controller->m_quietLeftTrigger = controller->m_quietLeftTrigger &&
+                                   controller->m_standardLeftTrigger >= g_quietTriggerThreshold;
+  controller->m_quietRightTrigger = controller->m_quietRightTrigger &&
+                                    controller->m_standardRightTrigger >= g_quietTriggerThreshold;
+  state->buttons = (controller->m_standardButtons | controller->m_standardButtonPresses) &
+                   ~controller->m_quietButtons;
   controller->m_standardButtonPresses = 0;
   state->leftX = controller->m_standardLeftX;
   state->leftY = controller->m_standardLeftY;
-  state->leftTrigger = controller->m_standardLeftTrigger;
-  state->rightTrigger = controller->m_standardRightTrigger;
-  state->vendor = SDL_GetGamepadVendor(controller->m_controller);
-  state->product = SDL_GetGamepadProduct(controller->m_controller);
+  state->leftTrigger = controller->m_quietLeftTrigger ? 0 : controller->m_standardLeftTrigger;
+  state->rightTrigger = controller->m_quietRightTrigger ? 0 : controller->m_standardRightTrigger;
   return true;
 }
 
@@ -533,6 +545,27 @@ void set_standard_gamepads_active(bool active) noexcept {
     }
   }
   Log.info("Standard gamepads {}", active ? "resumed" : "suspended");
+}
+
+void set_standard_gamepads_host_owned(bool owned, int16_t triggerThreshold) noexcept {
+  std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  if (g_standardGamepadsHostOwned.exchange(owned, std::memory_order_acq_rel) == owned) {
+    return;
+  }
+  g_quietTriggerThreshold = triggerThreshold;
+  for (auto& [instance, controller] : g_GameControllers) {
+    (void)instance;
+    if (!owned) {
+      controller.m_standardButtonPresses = 0;
+      controller.m_quietButtons = controller.m_standardButtons;
+      controller.m_quietLeftTrigger = controller.m_standardLeftTrigger >= triggerThreshold;
+      controller.m_quietRightTrigger = controller.m_standardRightTrigger >= triggerThreshold;
+    }
+    if (controller.m_controller != nullptr && controller.m_hasRumble) {
+      controller.m_standardRumbleDirty = true;
+    }
+  }
+  Log.info("Standard gamepads {} KartPad's screens", owned ? "owned by" : "returned from");
 }
 
 uint32_t list_standard_gamepads(uint32_t* instances, int32_t* players,
@@ -702,7 +735,8 @@ void flush_standard_gamepad_rumble() noexcept {
       continue;
     }
     const bool enabled = controller.m_standardRumbleEnabled &&
-                         g_standardGamepadsActive.load(std::memory_order_acquire);
+                         g_standardGamepadsActive.load(std::memory_order_acquire) &&
+                         !g_standardGamepadsHostOwned.load(std::memory_order_acquire);
     const uint16_t low = enabled ? controller.m_rumbleIntensityLow : 0;
     const uint16_t high = enabled ? controller.m_rumbleIntensityHigh : 0;
     if (!SDL_RumbleGamepad(controller.m_controller, low, high, enabled ? 0xffffffffu : 0u)) {

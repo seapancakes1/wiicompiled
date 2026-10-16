@@ -153,6 +153,23 @@ inline bool BeginAuroraFrame() {
 inline std::atomic_bool g_androidAuroraPollPending{false};
 #endif
 
+#if defined(__ANDROID__)
+// KartPad's own screens on Android (runtime/src/android/host_screens.cpp in the app) see every pump
+// and, while one is open, hold the game right here on the scheduler, pumping events themselves.
+// Weak, so a runtime built without the app's sources still links.
+extern "C" void KartPadAndroidServiceHostScreens(const AuroraEvent* events) __attribute__((weak));
+
+inline void ServiceAndroidHostScreens(const AuroraEvent* events) {
+    static bool servicing = false;
+    if (servicing || KartPadAndroidServiceHostScreens == nullptr) {
+        return;
+    }
+    servicing = true;
+    KartPadAndroidServiceHostScreens(events);
+    servicing = false;
+}
+#endif
+
 // Poll Aurora events and update cached window/framebuffer dimensions.
 inline void UpdateAuroraAndProcessEvents() {
 #if defined(__ANDROID__)
@@ -162,7 +179,11 @@ inline void UpdateAuroraAndProcessEvents() {
     }
     g_androidAuroraPollPending.store(false, std::memory_order_release);
 #endif
-    ProcessAuroraEvents(aurora_update());
+    const AuroraEvent* events = aurora_update();
+    ProcessAuroraEvents(events);
+#if defined(__ANDROID__)
+    ServiceAndroidHostScreens(events);
+#endif
 #if defined(__APPLE__) && TARGET_OS_IOS
     KartPadMobileServiceMainMenu();
 #endif
@@ -172,7 +193,9 @@ inline void ServicePendingAuroraEventsOnScheduler() {
 #if defined(__ANDROID__)
     if (Fiber::GuestFiberManager::IsOnSchedulerFiber() &&
         g_androidAuroraPollPending.exchange(false, std::memory_order_acq_rel)) {
-        ProcessAuroraEvents(aurora_update());
+        const AuroraEvent* events = aurora_update();
+        ProcessAuroraEvents(events);
+        ServiceAndroidHostScreens(events);
     }
 #endif
 }

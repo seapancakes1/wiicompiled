@@ -29,6 +29,10 @@ struct GameController {
   int16_t m_standardRightTrigger = 0;
   bool m_standardRumbleEnabled = false;
   bool m_standardRumbleDirty = false;
+  // Held when KartPad's screens handed the pads back; reads leave them out until released.
+  uint32_t m_quietButtons = 0;
+  bool m_quietLeftTrigger = false;
+  bool m_quietRightTrigger = false;
   PADDeadZones m_deadZones{
       .emulateTriggers = true,
       .useDeadzones = true,

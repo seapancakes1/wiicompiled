@@ -1779,3 +1779,7 @@ void NotifyStrapInputAccepted() noexcept {
 
 void AdvancePresentedFrame() noexcept { ++g_presentedFrame; }
 } // namespace settings_overlay
+
+// KartPad's screens on Android (runtime/src/android/host_screens.cpp in the app) wait while the
+// black "KartPad" screen is up as the game starts.
+extern "C" bool KartPadGameStarting() { return settings_overlay::StartupScreenVisible(); }
