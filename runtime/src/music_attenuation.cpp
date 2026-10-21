@@ -21,6 +21,14 @@
 
 #include <string>
 #include <vector>
+#elif defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <CoreAudio/CoreAudio.h>
+#include <unistd.h>
+
+#include <vector>
+#endif
 #endif
 
 namespace MusicAttenuation {
@@ -446,6 +454,93 @@ void MonitorLinuxMprisSessions() noexcept {
         std::this_thread::sleep_for(250ms);
     }
 }
+#elif defined(__APPLE__) && TARGET_OS_OSX
+
+// macOS has no public API for another app's now-playing state, so this watches
+// Core Audio's process objects (macOS 14.2) for any other process sending audio
+// to an output device. Calls count as well. Alerts are too short to pass
+// kMacStartPolls, and kMacStopPolls bridges the gap between two songs.
+constexpr int kMacStartPolls = 6; // 1.5 s at 250 ms
+constexpr int kMacStopPolls = 12; // 3 s
+
+API_AVAILABLE(macos(14.2))
+bool AnotherProcessIsRunningOutput() noexcept {
+    AudioObjectPropertyAddress address{kAudioHardwarePropertyProcessObjectList,
+                                       kAudioObjectPropertyScopeGlobal,
+                                       kAudioObjectPropertyElementMain};
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &address, 0, nullptr, &size) != noErr) {
+        return false;
+    }
+    std::vector<AudioObjectID> processes(size / sizeof(AudioObjectID));
+    if (processes.empty() ||
+        AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, nullptr, &size,
+                                   processes.data()) != noErr) {
+        return false;
+    }
+    processes.resize(size / sizeof(AudioObjectID));
+
+    const pid_t self = getpid();
+    for (const AudioObjectID process : processes) {
+        UInt32 running = 0;
+        UInt32 runningSize = sizeof(running);
+        address.mSelector = kAudioProcessPropertyIsRunningOutput;
+        if (AudioObjectGetPropertyData(process, &address, 0, nullptr, &runningSize, &running) != noErr ||
+            running == 0) {
+            continue;
+        }
+        pid_t pid = 0;
+        UInt32 pidSize = sizeof(pid);
+        address.mSelector = kAudioProcessPropertyPID;
+        if (AudioObjectGetPropertyData(process, &address, 0, nullptr, &pidSize, &pid) == noErr && pid != self) {
+            return true;
+        }
+    }
+    return false;
+}
+
+API_AVAILABLE(macos(14.2))
+void PollMacAudioProcesses() noexcept {
+    using namespace std::chrono_literals;
+
+    bool playing = false;
+    int playingPolls = 0;
+    int quietPolls = 0;
+    for (;;) {
+        if (!g_enabled.load(std::memory_order_acquire)) {
+            playing = false;
+            playingPolls = quietPolls = 0;
+            g_externalMediaPlaying.store(false, std::memory_order_release);
+            std::this_thread::sleep_for(1s);
+            continue;
+        }
+        if (AnotherProcessIsRunningOutput()) {
+            quietPolls = 0;
+            if (++playingPolls >= kMacStartPolls) {
+                playing = true;
+            }
+        } else {
+            playingPolls = 0;
+            if (++quietPolls >= kMacStopPolls) {
+                playing = false;
+            }
+        }
+        g_externalMediaPlaying.store(playing, std::memory_order_release);
+        std::this_thread::sleep_for(250ms);
+    }
+}
+
+void MonitorMacAudioProcesses() noexcept {
+    if (__builtin_available(macOS 14.2, *)) {
+        g_mediaControlAvailable.store(true, std::memory_order_release);
+        g_mediaControlInitializationComplete.store(true, std::memory_order_release);
+        PollMacAudioProcesses();
+    } else {
+        g_mediaControlAvailable.store(false, std::memory_order_release);
+        g_mediaControlInitializationComplete.store(true, std::memory_order_release);
+        std::cerr << "[audio] Other-app audio monitoring needs macOS 14.2" << std::endl;
+    }
+}
 #endif
 
 void StartMonitor() noexcept {
@@ -456,6 +551,9 @@ void StartMonitor() noexcept {
 #elif defined(__linux__)
     // Detached so there is no shutdown ordering to manage against static audio state.
     std::thread(MonitorLinuxMprisSessions).detach();
+#elif defined(__APPLE__) && TARGET_OS_OSX
+    // Detached, like the others.
+    std::thread(MonitorMacAudioProcesses).detach();
 #else
     g_mediaControlAvailable.store(false, std::memory_order_release);
     g_mediaControlInitializationComplete.store(true, std::memory_order_release);

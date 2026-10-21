@@ -1218,6 +1218,8 @@ void ApplyOtherSettings(const RuntimeUserConfig& c) {
     MusicAttenuation::SetSoundEffectsVolume(g_soundEffectsVolumePercent / 100.0f);
     MusicAttenuation::SetUiVolume(g_uiVolumePercent / 100.0f);
     MusicAttenuation::SetVoicesVolume(g_voicesVolumePercent / 100.0f);
+    g_attenuateMusicWhenMediaPlays = c.attenuateMusicWhenMediaPlays.value_or(false);
+    MusicAttenuation::SetEnabled(g_attenuateMusicWhenMediaPlays);
     if (g_audioMixWorker != c.audioMixWorker.value_or(true)) {
         g_audioMixWorker = c.audioMixWorker.value_or(true);
         AxDspHle::SetMixWorkerEnabled(g_audioMixWorker);
