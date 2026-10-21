@@ -4,6 +4,7 @@
 #include "wii_remote_input.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #if defined(__ANDROID__)
@@ -31,6 +32,34 @@ struct WpadStubState {
 };
 
 WpadStubState g_state{};
+
+#if defined(__ANDROID__)
+// Input::WiiController::HasRumble (0x805228DC) is false for the Classic
+// Controller type, so Mario Kart Wii never asks a Classic Controller to rumble,
+// and Android controllers reach the game as Classic Controllers. Point that
+// vtable slot at an existing translated "return true" (GameScene::vf_0x2c);
+// KartPad's Rumble setting still gates WPADControlMotor. A native override at
+// 0x805228DC would contradict the pack's generated indirect-dispatch table.
+constexpr uint32_t kWiiControllerVtable = 0x808B2E90u;
+constexpr uint32_t kWiiControllerHasRumble = 0x805228DCu;
+constexpr uint32_t kTranslatedReturnTrue = 0x8051B798u;
+bool g_classicRumbleEnabled = false;
+
+void EnableClassicControllerRumble()
+{
+    if (g_classicRumbleEnabled || !Memory::Contains(kWiiControllerVtable, 0x80)) {
+        return;
+    }
+    for (uint32_t slot = kWiiControllerVtable; slot < kWiiControllerVtable + 0x80; slot += 4) {
+        if (Memory::Read32(slot) == kWiiControllerHasRumble) {
+            Memory::Write32(slot, kTranslatedReturnTrue);
+            g_classicRumbleEnabled = true;
+            std::fprintf(stderr, "[input] Classic Controller rumble enabled (vtable slot 0x%08X)\n", slot);
+            return;
+        }
+    }
+}
+#endif
 
 void InvokeWpadCallback(uint32_t callback, uint32_t chan, int32_t result)
 {
@@ -125,6 +154,9 @@ PPC_NATIVE_OVERRIDE(801C0B9C, WPADSetDataFormat_HLE, int32_t, (uint32_t chan, in
 // WPADProbe: reports the extension type of a Bluetooth remote on `chan`, or no controller.
 extern "C" int32_t WPADProbe_HLE(uint32_t chan, uint32_t typePtr)
 {
+#if defined(__ANDROID__)
+    EnableClassicControllerRumble();
+#endif
     if (chan >= WpadContract::kChannelCount) {
         return WpadContract::kErrorBadChannel;
     }
@@ -161,10 +193,15 @@ PPC_NATIVE_OVERRIDE(801C0990, WPADProbe_HLE, int32_t, (uint32_t chan, uint32_t t
 extern "C" void WPADControlMotor_HLE(uint32_t chan, uint32_t command)
 {
 #if defined(__ANDROID__)
-    aurora::input::set_standard_gamepad_rumble(
-        chan, chan == 0,
-        kartpad::android::WpadMotorCommandEnablesRumble(command) &&
-            kartpad::android::ControllerVibrationEnabled());
+    // KartPad's Vibration setting and upstream's Rumble setting both have to allow it.
+    const bool requested = kartpad::android::WpadMotorCommandEnablesRumble(command) &&
+                           kartpad::android::ControllerVibrationEnabled() &&
+                           kartpad::android::ControllerRumbleEnabled();
+    const bool rumbled = aurora::input::set_standard_gamepad_rumble(chan, chan == 0, requested);
+    if (chan == 0) {
+        kartpad::android::SetDeviceRumble(kartpad::android::DeviceRumbleActive(
+            requested, rumbled, aurora::input::standard_gamepad_connected(0, true)));
+    }
 #else
     (void)chan;
     (void)command;
