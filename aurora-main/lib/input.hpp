@@ -20,6 +20,9 @@ struct GameController {
   bool m_gameCubeUseOrdinaryStop = false;
   Sint32 m_index = -1;
   Sint32 m_playerIndex = -1;
+  // Device path and the SDL player index at connect (the adapter port for GameCube adapters).
+  std::string m_path;
+  Sint32 m_slot = -1;
   bool m_hasRumble = false;
   uint32_t m_standardButtons = 0;
   uint32_t m_standardButtonPresses = 0;
@@ -33,6 +36,7 @@ struct GameController {
   uint32_t m_quietButtons = 0;
   bool m_quietLeftTrigger = false;
   bool m_quietRightTrigger = false;
+  float m_standardRumbleStrength = 1.0f;
   PADDeadZones m_deadZones{
       .emulateTriggers = true,
       .useDeadzones = true,

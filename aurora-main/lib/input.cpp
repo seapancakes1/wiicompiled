@@ -34,7 +34,10 @@ int16_t g_quietTriggerThreshold = 0;
 std::mutex g_standardGamepadBridgeMutex;
 
 constexpr uint32_t kPortPreferencesMagic = SBIG('CPRT');
-constexpr uint32_t kPortPreferencesVersion = 2;
+constexpr uint32_t kPortPreferencesVersion = 3;
+// The WiiCompiled graphics layer writes v4: v3 plus a trailing device rumble preference. Read it
+// so switching graphics layers keeps controller assignments; the trailer is not used here.
+constexpr uint32_t kPortPreferencesNewestReadable = 4;
 constexpr uint32_t kMaxPersistedStringLength = 256;
 
 enum class PortPreferenceState : uint8_t {
@@ -46,6 +49,8 @@ enum class PortPreferenceState : uint8_t {
 struct ControllerIdentity {
   std::string guid;
   std::string serial;
+  std::string path;
+  int32_t slot = -1;
 };
 
 struct PortPreference {
@@ -55,6 +60,9 @@ struct PortPreference {
 
 std::array<PortPreference, PAD_MAX_CONTROLLERS> g_portPreferences;
 bool g_portPreferencesLoaded = false;
+// Startup controllers are added one by one via events; capture their SDL player index at init,
+// before earlier port reassignments can move it.
+absl::flat_hash_map<SDL_JoystickID, int32_t> g_connectSlots;
 
 std::string port_preferences_path() {
   if (g_config.userPath == nullptr) {
@@ -94,6 +102,8 @@ ControllerIdentity controller_identity(const GameController& controller) {
   SDL_GUIDToString(SDL_GetGamepadGUIDForID(SDL_GetGamepadID(controller.m_controller)), guid, sizeof(guid));
   identity.guid = guid;
   identity.serial = normalize_serial(SDL_GetGamepadSerial(controller.m_controller));
+  identity.path = controller.m_path;
+  identity.slot = controller.m_slot;
   return identity;
 }
 
@@ -148,12 +158,16 @@ bool write_string(SDL_IOStream* file, const std::string& value) {
   return write_value(file, size) && (size == 0 || write_exact(file, value.data(), size));
 }
 
-bool read_identity(SDL_IOStream* file, ControllerIdentity& identity) {
-  return read_string(file, identity.guid) && read_string(file, identity.serial);
+bool read_identity(SDL_IOStream* file, uint32_t version, ControllerIdentity& identity) {
+  if (!read_string(file, identity.guid) || !read_string(file, identity.serial)) {
+    return false;
+  }
+  return version < 3 || (read_string(file, identity.path) && read_value(file, identity.slot));
 }
 
 bool write_identity(SDL_IOStream* file, const ControllerIdentity& identity) {
-  return write_string(file, identity.guid) && write_string(file, identity.serial);
+  return write_string(file, identity.guid) && write_string(file, identity.serial) &&
+         write_string(file, identity.path) && write_value(file, identity.slot);
 }
 
 bool read_port_preferences_file(std::array<PortPreference, PAD_MAX_CONTROLLERS>& preferences) {
@@ -170,13 +184,13 @@ bool read_port_preferences_file(std::array<PortPreference, PAD_MAX_CONTROLLERS>&
   uint32_t magic = 0;
   uint32_t version = 0;
   bool ok = read_value(file, magic) && read_value(file, version) && magic == kPortPreferencesMagic &&
-            version == kPortPreferencesVersion;
+            version >= 2 && version <= kPortPreferencesNewestReadable;
 
   for (auto& preference : preferences) {
     uint8_t state = 0;
     ControllerIdentity identity;
     ok = ok && read_value(file, state) && state <= static_cast<uint8_t>(PortPreferenceState::Controller) &&
-         read_identity(file, identity);
+         read_identity(file, version, identity);
     if (ok) {
       preference.state = static_cast<PortPreferenceState>(state);
       preference.identity = std::move(identity);
@@ -236,22 +250,31 @@ void save_port_preferences() {
   }
 }
 
-enum class IdentityMatch {
-  None,
-  Fallback,
-  Exact,
-};
+// Zero means no match. Higher scores claim ports first: path+slot > GUID > VID/PID.
+constexpr int kScoreVidPid = 1;
+constexpr int kScoreGuid = 2;
+constexpr int kScoreSlot = 1;
+constexpr int kScorePath = 2;
 
-IdentityMatch identity_match(const ControllerIdentity& saved, const ControllerIdentity& current) {
+int identity_score(const ControllerIdentity& saved, const ControllerIdentity& current) {
   if (saved.guid.empty()) {
-    return IdentityMatch::None;
+    return 0;
   }
   if (saved.guid == current.guid) {
-    return saved.serial.empty() || serial_matches(saved.serial, current.serial) ? IdentityMatch::Exact
-                                                                                : IdentityMatch::None;
+    if (!saved.serial.empty() && !serial_matches(saved.serial, current.serial)) {
+      return 0;
+    }
+    int score = kScoreGuid;
+    if (!saved.path.empty() && saved.path == current.path) {
+      score += kScorePath;
+    }
+    if (saved.slot >= 0 && saved.slot == current.slot) {
+      score += kScoreSlot;
+    }
+    return score;
   }
   if (!serial_matches(saved.serial, current.serial)) {
-    return IdentityMatch::None;
+    return 0;
   }
 
   // Attempt to match against VID/PID as a fallback if the GUID changes
@@ -261,9 +284,9 @@ IdentityMatch identity_match(const ControllerIdentity& saved, const ControllerId
   uint16_t currentProduct = 0;
   SDL_GetJoystickGUIDInfo(SDL_StringToGUID(saved.guid.c_str()), &savedVendor, &savedProduct, nullptr, nullptr);
   SDL_GetJoystickGUIDInfo(SDL_StringToGUID(current.guid.c_str()), &currentVendor, &currentProduct, nullptr, nullptr);
-  return savedVendor != 0 && savedVendor == currentVendor && savedProduct != 0 && savedProduct == currentProduct
-             ? IdentityMatch::Fallback
-             : IdentityMatch::None;
+  const bool sameDevice =
+      savedVendor != 0 && savedVendor == currentVendor && savedProduct != 0 && savedProduct == currentProduct;
+  return sameDevice ? kScoreVidPid : 0;
 }
 
 void assign_player_index(GameController& controller, int32_t port) {
@@ -300,7 +323,7 @@ bool port_reserved(uint32_t port) {
   case PortPreferenceState::Controller:
     return std::any_of(g_GameControllers.begin(), g_GameControllers.end(), [&](const auto& entry) {
       return entry.second.m_controller != nullptr &&
-             identity_match(preference.identity, controller_identity(entry.second)) != IdentityMatch::None;
+             identity_score(preference.identity, controller_identity(entry.second)) > 0;
     });
   }
   return false;
@@ -339,44 +362,62 @@ void apply_port_preferences() noexcept {
     }
   }
 
-  std::array<Uint32, PAD_MAX_CONTROLLERS> claimedControllers{};
+  struct Candidate {
+    int score;
+    uint32_t port;
+    Uint32 instance;
+  };
+  std::vector<Candidate> candidates;
+  for (const auto& [instance, controller] : g_GameControllers) {
+    const auto identity = controller_identity(controller);
+    for (uint32_t port = 0; port < g_portPreferences.size(); ++port) {
+      if (g_portPreferences[port].state != PortPreferenceState::Controller) {
+        continue;
+      }
+      if (const int score = identity_score(g_portPreferences[port].identity, identity); score > 0) {
+        candidates.push_back({score, port, instance});
+      }
+    }
+  }
+  // Best matches claim first so identical controllers each end up on their own port
+  std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+    if (a.score != b.score) {
+      return a.score > b.score;
+    }
+    return a.port != b.port ? a.port < b.port : a.instance < b.instance;
+  });
+
+  std::array<bool, PAD_MAX_CONTROLLERS> portClaimed{};
+  std::array<Uint32, PAD_MAX_CONTROLLERS> claimedInstances{};
   size_t claimedCount = 0;
-  for (uint32_t port = 0; port < g_portPreferences.size(); ++port) {
-    const auto& preference = g_portPreferences[port];
-    if (preference.state != PortPreferenceState::Controller) {
+  bool upgraded = false;
+  for (const auto& candidate : candidates) {
+    if (portClaimed[candidate.port] ||
+        std::find(claimedInstances.begin(), claimedInstances.begin() + claimedCount, candidate.instance) !=
+            claimedInstances.begin() + claimedCount) {
       continue;
     }
+    portClaimed[candidate.port] = true;
+    claimedInstances[claimedCount++] = candidate.instance;
+    auto& controller = g_GameControllers[candidate.instance];
+    assign_player_index(controller, static_cast<int32_t>(candidate.port));
 
-    Uint32 fallbackInstance = 0;
-    GameController* fallbackController = nullptr;
-    for (auto& [instance, controller] : g_GameControllers) {
-      if (is_instance_claimed(claimedControllers, claimedCount, instance)) {
-        continue;
+    // Preferences saved before path and slot existed gain them on their first GUID match
+    auto& saved = g_portPreferences[candidate.port].identity;
+    if (candidate.score >= kScoreGuid && (saved.path.empty() || saved.slot < 0)) {
+      const auto current = controller_identity(controller);
+      if (saved.path.empty() && !current.path.empty()) {
+        saved.path = current.path;
+        upgraded = true;
       }
-
-      switch (identity_match(preference.identity, controller_identity(controller))) {
-      case IdentityMatch::Exact:
-        assign_player_index(controller, static_cast<int32_t>(port));
-        claimedControllers[claimedCount++] = instance;
-        fallbackController = nullptr;
-        break;
-      case IdentityMatch::Fallback:
-        // Prefer any later exact match before claiming a fallback candidate
-        if (fallbackController == nullptr) {
-          fallbackInstance = instance;
-          fallbackController = &controller;
-        }
-        continue;
-      case IdentityMatch::None:
-        continue;
+      if (saved.slot < 0 && current.slot >= 0) {
+        saved.slot = current.slot;
+        upgraded = true;
       }
-      break;
     }
-
-    if (fallbackController != nullptr) {
-      assign_player_index(*fallbackController, static_cast<int32_t>(port));
-      claimedControllers[claimedCount++] = fallbackInstance;
-    }
+  }
+  if (upgraded) {
+    save_port_preferences();
   }
   assign_free_ports();
 }
@@ -509,7 +550,7 @@ bool read_standard_gamepad_state(uint32_t player, bool allowSingleUnassigned,
 }
 
 bool set_standard_gamepad_rumble(uint32_t player, bool allowSingleUnassigned,
-                                 bool enabled) noexcept {
+                                 bool enabled, float strength) noexcept {
   std::scoped_lock lock(g_standardGamepadBridgeMutex);
   if (enabled &&
       !g_standardGamepadsActive.load(std::memory_order_acquire)) {
@@ -523,6 +564,7 @@ bool set_standard_gamepad_rumble(uint32_t player, bool allowSingleUnassigned,
   }
 
   controller->m_standardRumbleEnabled = enabled;
+  controller->m_standardRumbleStrength = std::clamp(strength, 0.0f, 2.0f);
   controller->m_standardRumbleDirty = true;
   return true;
 }
@@ -678,6 +720,8 @@ uint32_t standard_button_mask(Uint8 button) noexcept {
   case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return kStandardGamepadDpadDown;
   case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return kStandardGamepadDpadLeft;
   case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return kStandardGamepadDpadRight;
+  case SDL_GAMEPAD_BUTTON_LEFT_STICK: return kStandardGamepadLeftStick;
+  case SDL_GAMEPAD_BUTTON_RIGHT_STICK: return kStandardGamepadRightStick;
   default: return 0;
   }
 }
@@ -737,8 +781,12 @@ void flush_standard_gamepad_rumble() noexcept {
     const bool enabled = controller.m_standardRumbleEnabled &&
                          g_standardGamepadsActive.load(std::memory_order_acquire) &&
                          !g_standardGamepadsHostOwned.load(std::memory_order_acquire);
-    const uint16_t low = enabled ? controller.m_rumbleIntensityLow : 0;
-    const uint16_t high = enabled ? controller.m_rumbleIntensityHigh : 0;
+    const auto intensity = [&](uint16_t base) -> uint16_t {
+      return enabled ? static_cast<uint16_t>(std::clamp(
+          static_cast<float>(base) * controller.m_standardRumbleStrength, 0.0f, 65535.0f)) : 0;
+    };
+    const uint16_t low = intensity(controller.m_rumbleIntensityLow);
+    const uint16_t high = intensity(controller.m_rumbleIntensityHigh);
     if (!SDL_RumbleGamepad(controller.m_controller, low, high, enabled ? 0xffffffffu : 0u)) {
       Log.warn("Failed to {} standard gamepad rumble: {}", enabled ? "start" : "stop", SDL_GetError());
     }
@@ -774,6 +822,15 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
       return -1;
     }
     controller.m_isGameCube = controller.m_vid == 0x057E && controller.m_pid == 0x0337;
+    if (const char* path = SDL_GetGamepadPath(ctrl); path != nullptr) {
+      controller.m_path = path;
+    }
+    if (const auto slot = g_connectSlots.find(which); slot != g_connectSlots.end()) {
+      controller.m_slot = slot->second;
+      g_connectSlots.erase(slot);
+    } else {
+      controller.m_slot = SDL_GetGamepadPlayerIndex(ctrl);
+    }
     const char* serial = SDL_GetGamepadSerial(ctrl);
     controller.m_gameCubeUseOrdinaryStop = controller.m_isGameCube && serial && "GCP+"sv == serial;
     if (controller.m_isGameCube ||
@@ -796,8 +853,7 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
       bool hasOtherPortPreference = false;
       for (size_t port = 1; port < g_portPreferences.size(); ++port) {
         if (g_portPreferences[port].state == PortPreferenceState::Controller &&
-            identity_match(g_portPreferences[port].identity, controller_identity(g_GameControllers[instance])) !=
-                IdentityMatch::None) {
+            identity_score(g_portPreferences[port].identity, controller_identity(g_GameControllers[instance])) > 0) {
           hasOtherPortPreference = true;
           break;
         }
@@ -845,6 +901,7 @@ bool refresh_controller(SDL_JoystickID instance) noexcept {
 
 void remove_controller(Uint32 instance) noexcept {
   std::scoped_lock lock(g_standardGamepadBridgeMutex);
+  g_connectSlots.erase(instance);
   if (auto it = g_GameControllers.find(instance); it != g_GameControllers.end()) {
     if (it->second.m_controller != nullptr && it->second.m_hasRumble) {
       SDL_RumbleGamepad(it->second.m_controller, 0, 0, 0);
@@ -930,6 +987,14 @@ void initialize() noexcept {
    * as expected */
   ASSERT(SDL_Init(SDL_INIT_HAPTIC | SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD), "Failed to initialize SDL subsystems: {}",
          SDL_GetError());
+
+  int count = 0;
+  if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
+    for (int i = 0; i < count; ++i) {
+      g_connectSlots[ids[i]] = SDL_GetGamepadPlayerIndexForID(ids[i]);
+    }
+    SDL_free(ids);
+  }
 }
 
 struct MouseScrollStatus {
