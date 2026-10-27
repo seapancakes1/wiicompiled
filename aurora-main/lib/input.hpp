@@ -23,6 +23,9 @@ struct GameController {
   // An SDL virtual joystick (a phone): its player lasts this session only. Kept from when it was
   // added, as SDL no longer says so once it's detached.
   bool m_isVirtual = false;
+  // Device path and the SDL player index at connect (the adapter port for GameCube adapters).
+  std::string m_path;
+  Sint32 m_slot = -1;
   bool m_hasRumble = false;
   PADDeadZones m_deadZones{
       .emulateTriggers = true,
