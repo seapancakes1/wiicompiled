@@ -21,9 +21,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -36,6 +39,7 @@
 
 #if defined(__ANDROID__)
 #include <android/log.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <time.h>
 #include <unistd.h>
@@ -58,10 +62,17 @@ std::atomic_bool g_auroraFrameHadWork{false};
 
 #if defined(__ANDROID__)
 namespace {
+// Wall time this thread spent in VI pacing sleeps; the hint subtracts it to get the frame's work.
+thread_local int64_t t_paceSleepNanos = 0;
+}
+#endif
+
+#if defined(__ANDROID__)
+namespace {
 // Android Dynamic Performance Framework hint for the game thread (API 33+).
-// Declares the per-frame budget and reports the thread's CPU work each
-// produced frame so the OS can raise clocks or move the thread to a faster
-// core when frames run long. It only affects scheduling, never game logic.
+// Declares the per-frame budget and reports each produced frame's wall-clock
+// work (pacing sleeps excluded) so the OS can raise clocks or move the threads
+// to faster cores when frames run long. It only affects scheduling, never game logic.
 // Loaded dynamically because the app still supports API 28.
 struct PerformanceHintApi {
     using GetManager = void* (*)();
@@ -72,14 +83,8 @@ struct PerformanceHintApi {
     ReportActual reportActual = nullptr;
     void* session = nullptr;
     bool attempted = false;
-    int64_t lastThreadCpuNanos = -1;
+    int64_t lastReportNanos = -1;
 };
-
-int64_t ThreadCpuNanos() {
-    timespec value{};
-    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0) return -1;
-    return static_cast<int64_t>(value.tv_sec) * 1000000000LL + value.tv_nsec;
-}
 
 void ReportGameThreadFrameWork(uint64_t intervalNanos) {
     static PerformanceHintApi api;
@@ -94,19 +99,47 @@ void ReportGameThreadFrameWork(uint64_t intervalNanos) {
                 dlsym(library, "APerformanceHint_reportActualWorkDuration"));
         }
         void* manager = api.getManager && api.createSession && api.reportActual ? api.getManager() : nullptr;
-        const int32_t thread = static_cast<int32_t>(gettid());
+        // The frame's critical path also runs on Aurora's helper threads (the beta engine's GX FIFO
+        // processor and render worker), so they join the session and get the same clock boost.
+        std::vector<int32_t> threads{static_cast<int32_t>(gettid())};
+        if (DIR* tasks = opendir("/proc/self/task")) {
+            while (const dirent* entry = readdir(tasks)) {
+                const int32_t tid = static_cast<int32_t>(std::atoi(entry->d_name));
+                if (tid <= 0 || tid == threads.front()) continue;
+                char name[32] = {};
+                const std::string path = std::string("/proc/self/task/") + entry->d_name + "/comm";
+                if (FILE* comm = std::fopen(path.c_str(), "r")) {
+                    if (std::fgets(name, sizeof(name), comm) && std::strncmp(name, "Aurora ", 7) == 0) {
+                        threads.push_back(tid);
+                    }
+                    std::fclose(comm);
+                }
+            }
+            closedir(tasks);
+        }
         const int64_t target = intervalNanos != 0 ? static_cast<int64_t>(intervalNanos) : 16666667LL;
-        api.session = manager ? api.createSession(manager, &thread, 1, target) : nullptr;
-        __android_log_print(ANDROID_LOG_INFO, "KartPadPerfHint", "game thread hint session %s (target_ns=%lld)",
-                            api.session ? "active" : "unavailable", static_cast<long long>(target));
+        api.session = manager ? api.createSession(manager, threads.data(), threads.size(), target) : nullptr;
+        if (!api.session && manager && threads.size() > 1) {
+            api.session = api.createSession(manager, threads.data(), 1, target);
+            threads.resize(1);
+        }
+        __android_log_print(ANDROID_LOG_INFO, "KartPadPerfHint",
+                            "game thread hint session %s (target_ns=%lld, threads=%zu, reports frame wall time)",
+                            api.session ? "active" : "unavailable", static_cast<long long>(target), threads.size());
     }
     if (!api.session) return;
-    const int64_t now = ThreadCpuNanos();
-    if (now < 0) return;
-    if (api.lastThreadCpuNanos >= 0 && now > api.lastThreadCpuNanos) {
-        api.reportActual(api.session, now - api.lastThreadCpuNanos);
+    // Report the frame's wall-clock work: time since the previous frame minus the pacing sleep.
+    // Thread CPU time alone hides waits on the helper threads, so a frame that took 20 ms could be
+    // reported as 13 ms and the OS would keep the cores slow.
+    const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const int64_t slept = t_paceSleepNanos;
+    t_paceSleepNanos = 0;
+    if (api.lastReportNanos >= 0 && now > api.lastReportNanos) {
+        const int64_t work = std::max<int64_t>(now - api.lastReportNanos - slept, 1000000);
+        api.reportActual(api.session, work);
     }
-    api.lastThreadCpuNanos = now;
+    api.lastReportNanos = now;
 }
 } // namespace
 #endif
@@ -225,8 +258,22 @@ std::chrono::microseconds IntervalForFormat(uint32_t tvFormat) {
 // presenter spin window). Larger windows burn a core for no visible gain.
 constexpr std::chrono::microseconds kFinalSpinWindow{500};
 
+void SleepPreciselyUntilImpl(Clock::time_point deadline, bool finishWithSpin,
+                             std::chrono::microseconds spinWindow);
+
 void SleepPreciselyUntil(Clock::time_point deadline, bool finishWithSpin = false,
                          std::chrono::microseconds spinWindow = 750us) {
+#if defined(__ANDROID__)
+    const auto sleepStart = Clock::now();
+    SleepPreciselyUntilImpl(deadline, finishWithSpin, spinWindow);
+    t_paceSleepNanos += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - sleepStart).count();
+#else
+    SleepPreciselyUntilImpl(deadline, finishWithSpin, spinWindow);
+#endif
+}
+
+void SleepPreciselyUntilImpl(Clock::time_point deadline, bool finishWithSpin,
+                             std::chrono::microseconds spinWindow) {
     const auto now = Clock::now();
     if (now >= deadline) {
         return;
@@ -391,6 +438,15 @@ static std::atomic<bool> s_inAdvanceRetrace{false};
 // end the freshly pre-warmed empty frame and show it as a black frame group.
 static std::atomic<bool> s_presentSequenceActive{false};
 
+// KartPad #390: during start-up MKWii draws the safety screen while VI black is still set, so every
+// retrace also presented a black frame between the game's own frames (about 100 presents a second).
+// Which one a 60/120 Hz display showed was down to timing: smooth on an iPad Pro, black on 8 of 9
+// frames on several iPhones. Once the game has presented a frame since VI black was switched on, that
+// frame stays on screen (as the Wii keeps showing its last XFB); black is presented again only after
+// the game switches VI black on anew and until its next frame.
+static std::atomic<bool> s_copiedSinceBlack{false};
+static bool s_wasBlack = false; // retrace context only
+
 void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool serviceAurora) {
     // Prevent re-entry - this can happen if OSWakeupThread triggers SelectThread
     // which goes idle and calls ProcessTimerEvents again
@@ -495,7 +551,12 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         const bool frameActive = g_auroraFrameActive.load(std::memory_order_acquire);
         const bool xfbMatches = (readyXfb != 0 && readyXfb == currentFb);
         const bool shouldPresentXfb = hasXfbReady && !isBlack && xfbMatches;
-        const bool shouldPresentBlack = isBlack && frameActive;
+        if (isBlack && !s_wasBlack) {
+            s_copiedSinceBlack.store(false, std::memory_order_release);
+        }
+        s_wasBlack = isBlack;
+        const bool shouldPresentBlack =
+            isBlack && frameActive && !s_copiedSinceBlack.load(std::memory_order_acquire);
         const bool shouldSubmit = frameActive && (shouldPresentXfb || shouldPresentBlack);
 
         if (shouldSubmit) {
@@ -669,6 +730,42 @@ void PaceToRetraceBoundary(Clock::time_point deadline) {
 
 } // namespace
 
+// KartPad #390: some iPhones/iPads show black on most frames while the Wii safety screen fades out.
+// Count what each present was: a game copy with draws, a game copy with no draws (shows the clear
+// colour), or a VI-black present. Logged once per 60 retraces, only for windows that had an empty or
+// black present, and at most 120 times, so the log says which path the black frames take.
+namespace {
+struct PresentKinds {
+    uint32_t copies = 0;
+    uint32_t emptyCopies = 0;
+    uint32_t black = 0;
+    uint32_t windowStartRetrace = 0;
+    uint32_t linesLogged = 0;
+};
+PresentKinds s_presentKinds;
+
+void CountPresentKind(bool presentedXfb, bool hadWork) {
+    uint32_t retrace = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_viMutex);
+        retrace = g_vi.retraceCount;
+    }
+    PresentKinds& k = s_presentKinds;
+    if (presentedXfb) {
+        (hadWork ? k.copies : k.emptyCopies)++;
+    } else {
+        k.black++;
+    }
+    if (retrace - k.windowStartRetrace < 60) return;
+    if ((k.emptyCopies != 0 || k.black != 0) && k.linesLogged < 120) {
+        ++k.linesLogged;
+        RT_LOGF(RT_TAG_VI, "present kinds: retraces=%u copies=%u empty_copies=%u black=%u\n",
+                retrace - k.windowStartRetrace, k.copies, k.emptyCopies, k.black);
+    }
+    k = PresentKinds{0, 0, 0, retrace, k.linesLogged};
+}
+} // namespace
+
 // Single owner of the Aurora frame presentation sequence: seals the active frame, optionally paces the
 // producer to the VI retrace boundary, and pre-warms the next frame. Paced from GXCopyDisp; unpaced for
 // the retrace-context black/boot present path in AdvanceRetrace.
@@ -743,6 +840,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     if (presentedXfb && paceToRetrace) {
         TraceKartStateAtFrameEnd(traceRetraceCount);
     }
+    CountPresentKind(presentedXfb, g_auroraFrameHadWork.load(std::memory_order_acquire));
     aurora_end_frame();
     if (paceThisFrame) {
         PaceToRetraceBoundary(paceDeadline);
@@ -756,6 +854,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         std::lock_guard<std::mutex> lock(g_viMutex);
         g_vi.hasValidXfb = false;
         g_vi.readyXfb = 0;
+        s_copiedSinceBlack.store(true, std::memory_order_release);
     }
     // Pre-warm the next frame so subsequent GX work has a valid frame context.
     {
